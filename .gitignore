@@ -1,1 +1,4 @@
 .idea
+/.reposuite/
+node_modules/
+*.tgz

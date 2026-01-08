@@ -1,0 +1,23 @@
+{
+  "name": "reposuite",
+  "version": "0.0.0",
+  "description": "Developer toolkit for repo navigation, task automation, and browser control.",
+  "license": "MIT",
+  "bin": {
+    "reposuite": "bin/reposuite.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "smoke:install": "node scripts/smoke-install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "RELEASE.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
