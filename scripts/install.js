@@ -190,21 +190,32 @@ function findFileRecursive(dir, name) {
 async function verifyChecksum(archivePath) {
   const checksumText = await downloadToString(checksumsUrl);
   if (!checksumText) {
-    console.log("checksums.txt not found. Skipping checksum validation.");
-    return;
+    throw new Error(
+      "checksums.txt not found. Expected a file containing lines like: <sha256> <asset>"
+    );
   }
 
-  const line = checksumText
+  const lines = checksumText
     .split(/\r?\n/)
     .map((value) => value.trim())
-    .find((value) => value.endsWith(` ${asset}`));
+    .filter(Boolean);
 
-  if (!line) {
-    console.log("Checksum entry not found. Skipping checksum validation.");
-    return;
+  let expected = null;
+  for (const line of lines) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 2) continue;
+    const name = parts[1].replace(/^\*/, "");
+    if (name === asset) {
+      expected = parts[0];
+      break;
+    }
   }
 
-  const expected = line.split(/\s+/)[0];
+  if (!expected) {
+    throw new Error(
+      `Checksum entry not found. Expected a line like: <sha256> *${asset}`
+    );
+  }
   const actual = await sha256File(archivePath);
   if (expected !== actual) {
     throw new Error("Checksum validation failed.");
