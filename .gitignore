@@ -2,4 +2,5 @@
 /.reposuite/
 node_modules/
 *.tgz
+assets/
 .env

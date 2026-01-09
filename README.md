@@ -25,6 +25,11 @@ reposuite --help
 RepoSuite downloads platform-specific binaries from GitHub Releases during install.
 To install a specific release, set `REPOSUITE_VERSION` (example: `v1.2.3`).
 
+For local testing with a packaged tarball that bundles assets:
+```bash
+npm i -g ./reposuite-<version>.tgz
+```
+
 Optional alias (print-only, no auto changes):
 
 ```bash

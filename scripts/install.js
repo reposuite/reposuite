@@ -30,6 +30,7 @@ if (!platform || !arch) {
 
 const owner = process.env.REPOSUITE_OWNER || "reposuite";
 const repo = process.env.REPOSUITE_REPO || "reposuite";
+const assetDirEnv = process.env.REPOSUITE_ASSET_DIR;
 
 let version = process.env.REPOSUITE_VERSION;
 if (!version) {
@@ -45,6 +46,14 @@ const asset =
 
 const url = `https://github.com/${owner}/${repo}/releases/download/${version}/${asset}`;
 const checksumsUrl = `https://github.com/${owner}/${repo}/releases/download/${version}/checksums.txt`;
+const bundledAssetDir = path.join(__dirname, "..", "assets");
+const assetDir = assetDirEnv
+  ? path.isAbsolute(assetDirEnv)
+    ? assetDirEnv
+    : path.join(__dirname, "..", assetDirEnv)
+  : fs.existsSync(bundledAssetDir)
+  ? bundledAssetDir
+  : null;
 const targetDir = path.join(
   __dirname,
   "..",
@@ -223,6 +232,36 @@ async function verifyChecksum(archivePath) {
   console.log("Checksum validated.");
 }
 
+async function verifyChecksumFromFile(archivePath, checksumPath) {
+  const checksumText = fs.readFileSync(checksumPath, "utf8");
+  const lines = checksumText
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  let expected = null;
+  for (const line of lines) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 2) continue;
+    const name = parts[1].replace(/^\*/, "");
+    if (name === asset) {
+      expected = parts[0];
+      break;
+    }
+  }
+
+  if (!expected) {
+    throw new Error(
+      `Checksum entry not found. Expected a line like: <sha256> *${asset}`
+    );
+  }
+  const actual = await sha256File(archivePath);
+  if (expected !== actual) {
+    throw new Error("Checksum validation failed.");
+  }
+  console.log("Checksum validated.");
+}
+
 async function main() {
   fs.mkdirSync(targetDir, { recursive: true });
 
@@ -243,11 +282,26 @@ async function main() {
   const archivePath = path.join(tempDir, asset);
 
   try {
-    console.log("Downloading release asset...");
-    await downloadToFile(url, archivePath);
-    await verifyChecksum(archivePath);
-    console.log("Extracting archive...");
-    extractArchive(archivePath);
+    if (assetDir) {
+      const localArchive = path.join(assetDir, asset);
+      const checksumPath = path.join(assetDir, "checksums.txt");
+      if (!fs.existsSync(localArchive)) {
+        throw new Error(`Local asset not found: ${localArchive}`);
+      }
+      if (!fs.existsSync(checksumPath)) {
+        throw new Error(`Local checksums.txt not found: ${checksumPath}`);
+      }
+      console.log(`Using local asset: ${localArchive}`);
+      await verifyChecksumFromFile(localArchive, checksumPath);
+      console.log("Extracting archive...");
+      extractArchive(localArchive);
+    } else {
+      console.log("Downloading release asset...");
+      await downloadToFile(url, archivePath);
+      await verifyChecksum(archivePath);
+      console.log("Extracting archive...");
+      extractArchive(archivePath);
+    }
 
     const desiredPath = path.join(targetDir, exeName);
     let binPath = fs.existsSync(desiredPath)
