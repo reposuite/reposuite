@@ -1,6 +1,6 @@
 {
   "name": "reposuite",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Developer toolkit for repo navigation, task automation, and browser control.",
   "license": "MIT",
   "bin": {
