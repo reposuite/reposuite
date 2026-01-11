@@ -38,14 +38,24 @@ if (!version) {
   const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
   version = `v${pkg.version}`;
 }
+const versionNoV = version.startsWith("v") ? version.slice(1) : version;
 
-const asset =
+const assetVersioned =
+  platform === "windows"
+    ? `reposuite_${versionNoV}_windows_${arch}.zip`
+    : `reposuite_${versionNoV}_${platform}_${arch}.tar.gz`;
+const assetLegacy =
   platform === "windows"
     ? `reposuite_windows_${arch}.zip`
     : `reposuite_${platform}_${arch}.tar.gz`;
+const checksumsVersioned = `checksums_${versionNoV}_sha256.txt`;
+const checksumsLegacy = "checksums.txt";
 
-const url = `https://github.com/${owner}/${repo}/releases/download/${version}/${asset}`;
-const checksumsUrl = `https://github.com/${owner}/${repo}/releases/download/${version}/checksums.txt`;
+const baseUrl = `https://github.com/${owner}/${repo}/releases/download/${version}`;
+const urlVersioned = `${baseUrl}/${assetVersioned}`;
+const urlLegacy = `${baseUrl}/${assetLegacy}`;
+const checksumsUrlVersioned = `${baseUrl}/${checksumsVersioned}`;
+const checksumsUrlLegacy = `${baseUrl}/${checksumsLegacy}`;
 const bundledAssetDir = path.join(__dirname, "..", "assets");
 const assetDir = assetDirEnv
   ? path.isAbsolute(assetDirEnv)
@@ -196,33 +206,34 @@ function findFileRecursive(dir, name) {
   return null;
 }
 
-async function verifyChecksum(archivePath) {
-  const checksumText = await downloadToString(checksumsUrl);
-  if (!checksumText) {
-    throw new Error(
-      "checksums.txt not found. Expected a file containing lines like: <sha256> <asset>"
-    );
-  }
-
+function findExpectedChecksum(checksumText, assetName) {
   const lines = checksumText
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter(Boolean);
 
-  let expected = null;
   for (const line of lines) {
     const parts = line.split(/\s+/);
     if (parts.length < 2) continue;
     const name = parts[1].replace(/^\*/, "");
-    if (name === asset) {
-      expected = parts[0];
-      break;
+    if (name === assetName) {
+      return parts[0];
     }
   }
 
+  return null;
+}
+
+async function verifyChecksumFromUrl(archivePath, checksumUrl, assetName) {
+  const checksumText = await downloadToString(checksumUrl);
+  if (!checksumText) {
+    throw new Error(`Checksum file not found: ${checksumUrl}`);
+  }
+
+  const expected = findExpectedChecksum(checksumText, assetName);
   if (!expected) {
     throw new Error(
-      `Checksum entry not found. Expected a line like: <sha256> *${asset}`
+      `Checksum entry not found. Expected a line like: <sha256> *${assetName}`
     );
   }
   const actual = await sha256File(archivePath);
@@ -232,27 +243,13 @@ async function verifyChecksum(archivePath) {
   console.log("Checksum validated.");
 }
 
-async function verifyChecksumFromFile(archivePath, checksumPath) {
+async function verifyChecksumFromFile(archivePath, checksumPath, assetName) {
   const checksumText = fs.readFileSync(checksumPath, "utf8");
-  const lines = checksumText
-    .split(/\r?\n/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  let expected = null;
-  for (const line of lines) {
-    const parts = line.split(/\s+/);
-    if (parts.length < 2) continue;
-    const name = parts[1].replace(/^\*/, "");
-    if (name === asset) {
-      expected = parts[0];
-      break;
-    }
-  }
+  const expected = findExpectedChecksum(checksumText, assetName);
 
   if (!expected) {
     throw new Error(
-      `Checksum entry not found. Expected a line like: <sha256> *${asset}`
+      `Checksum entry not found. Expected a line like: <sha256> *${assetName}`
     );
   }
   const actual = await sha256File(archivePath);
@@ -267,8 +264,9 @@ async function main() {
 
   console.log(`Platform: ${platform}`);
   console.log(`Architecture: ${arch}`);
-  console.log(`Asset: ${asset}`);
-  console.log(`URL: ${url}`);
+  console.log(`Asset (preferred): ${assetVersioned}`);
+  console.log(`Asset (fallback): ${assetLegacy}`);
+  console.log(`URL (preferred): ${urlVersioned}`);
   console.log(`Target directory: ${targetDir}`);
 
   if (version === "v0.0.0") {
@@ -279,26 +277,62 @@ async function main() {
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "reposuite-"));
-  const archivePath = path.join(tempDir, asset);
 
   try {
     if (assetDir) {
-      const localArchive = path.join(assetDir, asset);
-      const checksumPath = path.join(assetDir, "checksums.txt");
-      if (!fs.existsSync(localArchive)) {
-        throw new Error(`Local asset not found: ${localArchive}`);
+      const localVersioned = path.join(assetDir, assetVersioned);
+      const localLegacy = path.join(assetDir, assetLegacy);
+      let localArchive = null;
+      let checksumPath = null;
+      let assetName = null;
+      if (fs.existsSync(localVersioned)) {
+        localArchive = localVersioned;
+        checksumPath = path.join(assetDir, checksumsVersioned);
+        assetName = assetVersioned;
+      } else if (fs.existsSync(localLegacy)) {
+        localArchive = localLegacy;
+        checksumPath = path.join(assetDir, checksumsLegacy);
+        assetName = assetLegacy;
+      } else {
+        throw new Error(
+          `Local asset not found. Expected ${localVersioned} or ${localLegacy}`
+        );
       }
       if (!fs.existsSync(checksumPath)) {
-        throw new Error(`Local checksums.txt not found: ${checksumPath}`);
+        throw new Error(
+          `Local ${path.basename(checksumPath)} not found: ${checksumPath}`
+        );
       }
       console.log(`Using local asset: ${localArchive}`);
-      await verifyChecksumFromFile(localArchive, checksumPath);
+      await verifyChecksumFromFile(localArchive, checksumPath, assetName);
       console.log("Extracting archive...");
       extractArchive(localArchive);
     } else {
+      const tryDownload = async (assetName, url) => {
+        const archivePath = path.join(tempDir, assetName);
+        await downloadToFile(url, archivePath);
+        return archivePath;
+      };
+      const isNotFoundError = (error) =>
+        error && typeof error.message === "string" && error.message.includes("(404)");
+
       console.log("Downloading release asset...");
-      await downloadToFile(url, archivePath);
-      await verifyChecksum(archivePath);
+      let archivePath = null;
+      let assetName = assetVersioned;
+      let checksumUrl = checksumsUrlVersioned;
+      try {
+        archivePath = await tryDownload(assetVersioned, urlVersioned);
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          console.log("Preferred asset not found; falling back to legacy asset.");
+          assetName = assetLegacy;
+          checksumUrl = checksumsUrlLegacy;
+          archivePath = await tryDownload(assetLegacy, urlLegacy);
+        } else {
+          throw error;
+        }
+      }
+      await verifyChecksumFromUrl(archivePath, checksumUrl, assetName);
       console.log("Extracting archive...");
       extractArchive(archivePath);
     }
