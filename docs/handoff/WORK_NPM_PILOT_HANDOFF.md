@@ -30,8 +30,8 @@ bounded exponential backoff. Gateway works fully offline.
 ## Candidate artifacts (Lead-built, not yet published)
 
 ```
-reposuite-0.3.0-beta.1.tgz                  sha256 5c9dc1f77e2788b3e7dfb7e2f19653eb22d6587f9572300b79b3149844014242
-reposuite-linux-x64-0.3.0-beta.1.tgz        sha256 7f996d8db268f4e061716bc612fae625c68d93664030e22d2ce4ba1462d0575b
+reposuite-0.3.0-beta.1.tgz                  sha256 336e1ccb6bcdc2a57119888fcb4bee8a992f6ce0811de22f5337e42e41dbe494
+reposuite-linux-x64-0.3.0-beta.1.tgz        sha256 515e644e00880e12596d237d4d8f9a6bace603a833e023b8fd8b64d64703a00c
 ```
 
 Reproduce from source (verified build): clone the three repos at the pins,
