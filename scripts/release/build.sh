@@ -6,7 +6,7 @@ OUT=packages/linux-x64/bin
 rm -rf "$OUT"; mkdir -p "$OUT"
 # canonical CLI: Rust binary built from THIS repository (pinned by the
 # repo commit itself); Node is only the npm launcher.
-cargo build --release --locked 2>/dev/null || cargo build --release
+cargo build --release --locked
 cp target/release/reposuite "$OUT/reposuite"
 # EXACTLY TWO binaries — the Connector is embedded in Gateway.
 (cd ../reposuite-gateway && CGO_ENABLED=1 GOTOOLCHAIN=auto go build -buildvcs=false -trimpath \
