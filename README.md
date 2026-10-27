@@ -60,3 +60,11 @@ Linux x64 (Ubuntu 22.04+) — first supported platform.
 ## License
 
 CLI + packaging: MIT. Native platform binaries: proprietary (see LICENSE.md).
+
+## Architecture note
+
+`bin/reposuite.js` is the single canonical `reposuite` CLI. A future
+compiled Rust CLI may be shipped as a native payload inside the platform
+package (`packages/linux-x64/bin/`) — the JS file then delegates to it —
+but there is only ever ONE user-facing `reposuite` command; no competing
+implementations exist in this repository.

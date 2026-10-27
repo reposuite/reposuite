@@ -6,5 +6,5 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "files": ["bin/"],
-  "publishConfig": { "access": "restricted" }
+  "publishConfig": { "access": "public" }
 }

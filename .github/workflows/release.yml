@@ -6,7 +6,11 @@ on:
       tag: { description: "npm dist-tag", default: beta }
 permissions:
   contents: write
-  id-token: write          # npm Trusted Publishing (OIDC)
+  id-token: write            # npm Trusted Publishing (OIDC) — no stored tokens
+env:
+  CONTROL_SHA: ${{ vars.RELEASE_CONTROL_SHA }}
+  GATEWAY_SHA: ${{ vars.RELEASE_GATEWAY_SHA }}
+  RELAY_SHA: ${{ vars.RELEASE_RELAY_SHA }}
 jobs:
   publish:
     runs-on: ubuntu-22.04
@@ -15,6 +19,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20, registry-url: https://registry.npmjs.org }
-      - run: node scripts/smoke-install.js
-      - run: NPM_TAG=${{ github.event.inputs.tag }} bash scripts/release/publish.sh --approve
-        env: { NODE_AUTH_TOKEN: "" }   # OIDC trusted publishing — no long-lived token
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.27.1' }
+      # private source fetch via a repo-scoped deploy key / fine-grained PAT
+      # stored as ACTIONS secrets (never logged, never persisted to artifacts)
+      - name: fetch private sources
+        env:
+          SSH_KEY: ${{ secrets.RELEASE_SOURCES_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone git@github.com:rceman/reposuite-control.git ../reposuite-gw
+          git -C ../reposuite-gw checkout "$CONTROL_SHA"
+          git clone git@github.com:rceman/reposuite-gateway.git ../reposuite-gateway
+          git -C ../reposuite-gateway checkout "$GATEWAY_SHA"
+          git clone https://github.com/rceman/reposuite-relay ../reposuite-relay
+          git -C ../reposuite-relay checkout "$RELAY_SHA"
+          rm -f ~/.ssh/id_rsa
+      - run: bash scripts/release/prepare.sh "$(node -p 'require("./package.json").version')"
+      - run: bash scripts/release/build.sh
+      - run: bash scripts/release/package.sh
+      - run: bash scripts/release/verify.sh
+      - name: real install smoke in clean HOME
+        run: |
+          T=$(mktemp -d)
+          export HOME=$T XDG_DATA_HOME=$T/.local/share XDG_CONFIG_HOME=$T/.config XDG_RUNTIME_DIR=$T/run
+          mkdir -p $T/.local/bin $T/run $T/.local/lib && export PATH=$T/.local/bin:$PATH
+          npm config set prefix $T/.local
+          npm install -g release-artifacts/reposuite-*.tgz --install-links || true
+          reposuite version && reposuite help
+      - name: publish (OIDC trusted publishing)
+        run: NPM_TAG=${{ github.event.inputs.tag }} bash scripts/release/publish.sh --approve
+      - uses: actions/upload-artifact@v4
+        with: { name: release-artifacts, path: release-artifacts/, retention-days: 7 }

@@ -5,7 +5,9 @@ set -euo pipefail
 [ "${1:-}" = "--approve" ] || { echo "publish: pass --approve after review" >&2; exit 1; }
 TAG="${NPM_TAG:-beta}"
 V=$(node -p 'require("./package.json").version')
-npm view "reposuite@$V" version >/dev/null 2>&1 && { echo "publish: $V already on npm — never reuse a version" >&2; exit 1; }
+npm view "reposuite@$V" version >/dev/null 2>&1 && { echo "publish: reposuite@$V already on npm" >&2; exit 1; }
+npm view "@reposuite/linux-x64@$V" version >/dev/null 2>&1 && { echo "publish: linux-x64@$V already on npm" >&2; exit 1; }
+# platform package FIRST — the entry pkg's optionalDependency must resolve
+(cd packages/linux-x64 && npm publish --tag "$TAG" --access public ${DRY_RUN:+--dry-run})
 npm publish --tag "$TAG" --access public ${DRY_RUN:+--dry-run}
-(cd packages/linux-x64 && npm publish --tag "$TAG" --access restricted ${DRY_RUN:+--dry-run})
 echo "publish: $V -> $TAG ${DRY_RUN:+(dry-run)}"

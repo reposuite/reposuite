@@ -47,16 +47,24 @@ const isActive = u => {
 const mkdir = d => fs.mkdirSync(d, { recursive: true, mode: 0o700 });
 const paired = () => fs.existsSync(path.join(CONN_DIR, 'gateway.json'));
 
-// Locate the native bin dir: prefer activated version dir, else the package's
-// own bundled binaries (npm optional platform package layout).
-function binDir() {
+// Two distinct binary sources — never conflate:
+//  pkgBinDir(): binaries inside THIS installed npm package (the new version).
+//  installedBinDir(): the currently activated runtime (old version).
+// update/setup must always install from pkgBinDir, never from the old runtime.
+function pkgBinDir() {
   for (const cand of [
-    path.join(CURRENT, 'bin'),
+    // npm hoists optionalDependencies to the top-level node_modules as a
+    // SIBLING of the entry package (<prefix>/lib/node_modules/@reposuite/...)
+    path.join(__dirname, '..', '..', '@reposuite', `linux-${process.arch}`, 'bin'),
+    path.join(__dirname, '..', 'node_modules', '@reposuite', `linux-${process.arch}`, 'bin'),
     path.join(__dirname, '..', 'vendor', process.platform + '-' + process.arch),
     path.join(__dirname, '..', 'bin-native'),
-    path.join(__dirname, '..', 'node_modules', '@reposuite', `linux-${process.arch}`, 'bin'),
-  ]) if (cand && fs.existsSync(path.join(cand, 'reposuite-gateway'))) return cand;
+  ]) if (fs.existsSync(path.join(cand, 'reposuite-gateway'))) return cand;
   return null;
+}
+function installedBinDir() {
+  const c = path.join(CURRENT, 'bin');
+  return fs.existsSync(path.join(c, 'reposuite-gateway')) ? c : null;
 }
 
 function activate(version) {
@@ -72,6 +80,15 @@ function activate(version) {
 function currentVersion() {
   try { return path.basename(fs.realpathSync(CURRENT)); } catch { return null; }
 }
+function cmpVer(a, b) {
+  const pa = a.split(/[.+-]/).map(x => /^\d+$/.test(x) ? +x : x);
+  const pb = b.split(/[.+-]/).map(x => /^\d+$/.test(x) ? +x : x);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x !== y) return typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+  }
+  return 0;
+}
 
 function runningSessions() {
   // real check: relay daemon sessionCount > 0 defers unsafe activation
@@ -81,8 +98,13 @@ function runningSessions() {
     const out = execFileSync('wget', ['-qO-', `--header=Authorization: Bearer ${tok}`,
       `http://127.0.0.1:${port}/v1/daemon`], { encoding: 'utf8', timeout: 5000 });
     const d = JSON.parse(out);
-    return (d.daemon && d.daemon.activeSessions) || 0;
-  } catch { return -1; } // unknown -> caller treats conservatively
+    const n = (d.daemon && (d.daemon.activeSessions ?? d.daemon.sessionCount)) || 0;
+    return n;
+  } catch {
+    // unknown: relay never initialized (no token) means no sessions possible;
+    // an EXISTING token that failed to answer means state unknown -> deny.
+    return fs.existsSync(path.join(RSR_HOME, 'config', 'api.token')) ? -1 : 0;
+  }
 }
 
 function writeUnits(bin) {
@@ -141,7 +163,7 @@ WantedBy=default.target
 
 const cmds = {
   setup() {
-    const b = binDir();
+    const b = pkgBinDir();
     if (!b) die('native binaries not found — is the platform package installed?');
     // install this package's binaries into a versioned runtime dir, then
     // atomically activate — updates never delete a running path
@@ -163,20 +185,23 @@ const cmds = {
     if (paired()) return ok(`already paired (${CONN_DIR}/gateway.json)`);
     // protected input: stdin pipe or hidden prompt — NEVER argv/env/history
     let invite;
-    if (!process.stdin.isTTY) invite = fs.readFileSync(0, 'utf8').trim();
-    else {
-      const rl = require('readline').createInterface({ input: process.stdin, output: process.stderr });
-      try { require('readline').emitKeypressEvents(process.stdin); if (process.stdin.isTTY) process.stdin.setRawMode(true); } catch {}
+    if (!process.stdin.isTTY) {
+      invite = fs.readFileSync(0, 'utf8').trim();
+    } else {
+      // hidden interactive entry: raw-mode readline, echo muted
       invite = '';
+      const rl = require('readline').createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+      rl._writeToOutput = () => {};           // mute echo
       process.stderr.write('invite (inv_<id>.<secret>): ');
-      invite = fs.readFileSync('/dev/stdin', 'utf8').trim(); // fallback for simplicity
+      invite = require('child_process').execSync('stty -echo; head -n1; stty echo', { shell: '/bin/sh', encoding: 'utf8' }).trim();
       rl.close();
+      process.stderr.write('\n');
     }
     if (!/^inv_[\w-]+\.[\w-]+$/.test(invite)) die('malformed invite');
     mkdir(CONN_DIR); fs.chmodSync(CONN_DIR, 0o700);
     const ifile = path.join(CONN_DIR, `.invite.${process.pid}`);
     fs.writeFileSync(ifile, invite, { mode: 0o600 });
-    const b = binDir() || path.join(VERSIONS, currentVersion() || '', 'bin');
+    const b = installedBinDir() || pkgBinDir();
     const was = isActive('reposuite-connector'); if (was) svc('stop', 'reposuite-connector');
     const p = spawnSync(path.join(b, 'rsc-connector'),
       ['-server', WSS, '-invite-file', ifile, '-state', CONN_DIR,
@@ -185,9 +210,10 @@ const cmds = {
     try { fs.unlinkSync(ifile); } catch {}
     if (was) svc('start', 'reposuite-connector');
     if (!paired()) die('pairing failed: no durable gateway.json (expired/refused invite?)');
-    const j = fs.readFileSync(path.join(CONN_DIR, 'gateway.json'), 'utf8');
-    if (!j.trim()) die('gateway.json present but identity unverified');
-    ok('paired — durable credential stored');
+    let j; try { j = JSON.parse(fs.readFileSync(path.join(CONN_DIR, 'gateway.json'), 'utf8')); }
+    catch { die('gateway.json present but unparseable — identity unverified'); }
+    if (!(j.credential || j.token || j.key || j.gateway)) die('gateway.json lacks gateway credential — unverified');
+    ok('paired — durable credential + gateway identity stored');
   },
 
   doctor() {
@@ -197,7 +223,7 @@ const cmds = {
     console.log('reposuite doctor  (v' + VERSION + ')');
     console.log(' pre-pair:');
     chk('linux platform', () => process.platform === 'linux');
-    chk('native binaries', () => !!binDir() || !!currentVersion());
+    chk('native binaries', () => !!pkgBinDir() || !!installedBinDir());
     chk('provider cli (any)', () => ['codex', 'devin', 'opencode'].some(have));
     chk('systemd --user', systemdOK);
     console.log(' post-pair/service:');
@@ -235,24 +261,28 @@ const cmds = {
 
   'update-check': () => {
     try {
-      const out = execFileSync('npm', ['view', 'reposuite', 'version', '--json'],
+      const out = execFileSync('npm', ['view', 'reposuite', 'dist-tags', '--json'],
         { encoding: 'utf8' }).trim();
-      const latest = JSON.parse(out);
-      console.log(`installed ${VERSION}  latest ${latest}${latest === VERSION ? '  (up to date)' : '  — run: npm update -g reposuite'}`);
+      const tags = JSON.parse(out);
+      const chan = /beta|alpha|rc/.test(VERSION) ? (tags.beta || tags.latest) : (tags.latest || tags.beta);
+      console.log(`installed ${VERSION}  channel ${chan}${chan === VERSION ? '  (up to date)' : '  — run: npm update -g reposuite'}`);
     } catch { die('npm registry unreachable'); }
   },
 
   'update-apply': () => {
     const cur = currentVersion();
     const sessions = runningSessions();
-    if (sessions > 0) die(`${sessions} agent session(s) running — deferring activation (stop them or run 'reposuite stop' first)`);
-    // npm already replaced the package; find the NEWEST version dir the new
-    // package would create, or activate the package's bundled binaries.
-    const b = binDir();
-    if (!b) die('no binaries in installed package');
+    if (sessions !== 0) die(sessions > 0
+      ? `${sessions} agent session(s) running — deferring activation`
+      : 'Relay state unknown — deferring activation (fail closed)');
+    // install the NEW package's own binaries into a fresh version dir —
+    // never re-copy the old activated runtime into a new version.
+    const b = pkgBinDir();
+    if (!b) die('new package carries no platform binaries');
     const v = VERSION;
     const vdir = path.join(VERSIONS, v);
-    if (!fs.existsSync(vdir)) { cmds.setup(); return; }
+    mkdir(path.join(vdir, 'bin'));
+    for (const f of OWNED_BINS) fs.copyFileSync(path.join(b, f), path.join(vdir, 'bin', f));
     activate(v);
     writeUnits(path.join(vdir, 'bin'));
     if (systemdOK()) { execSync('systemctl --user daemon-reload'); cmds.restart(); }
@@ -261,7 +291,7 @@ const cmds = {
 
   rollback: () => {
     const cur = currentVersion();
-    const versions = fs.readdirSync(VERSIONS).filter(v => v !== cur).sort().reverse();
+    const versions = fs.readdirSync(VERSIONS).filter(v => v !== cur).sort(cmpVer).reverse();
     if (!versions.length) die('no previous version to roll back to');
     const target = versions[0];
     if (runningSessions() > 0) die('active sessions — stop first');
@@ -283,11 +313,19 @@ const cmds = {
   },
 
   'purge-state': () => {
+    if (args.includes('--yes') !== true) {
+      console.log('purge-state permanently removes:');
+      for (const d of [RSG_DIR, path.join(HOME, '.reposuite'), CONN_DIR, path.join(XDG_DATA, 'reposuite')])
+        console.log('  ' + d);
+      if (!process.stdin.isTTY) die('non-interactive: pass --yes to confirm');
+      const a = fs.readFileSync(0, 'utf8').trim();
+      if (a !== 'purge') die('aborted');
+    }
     cmds.uninstall();
     for (const d of [RSG_DIR, path.join(HOME, '.reposuite'), CONN_DIR,
                      path.join(XDG_DATA, 'reposuite'), ENV_FILE])
       try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
-    ok('RepoSuite state purged (owned roots only)');
+    ok('RepoSuite state purged (owned roots only; unrelated state untouched)');
   },
 
   version: () => console.log(VERSION),
