@@ -196,8 +196,9 @@ fn running_sessions(p: &Paths) -> i64 {
 fn write_units(p: &Paths, bin: &Path) {
     let _ = fs::create_dir_all(&p.units);
     let b = bin.display();
-    let gw = format!("[Unit]\nDescription=RepoSuite Gateway (user)\nAfter=default.target\n\n[Service]\nUMask=0077\nEnvironmentFile={}\nEnvironment=REPOSUITE_RSR_HOME={}\nExecStart={b}/reposuite-gateway serve --data-dir {} --socket {}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
-        p.env_file.display(), p.relay.display(), p.gateway.display(), p.socket.display());
+    let gw = format!("[Unit]\nDescription=RepoSuite Gateway (user)\nAfter=default.target\n\n[Service]\nUMask=0077\nEnvironmentFile={}\nEnvironment=REPOSUITE_RSR_HOME={}\nEnvironment=REPOSUITE_GATEWAY_STATE={}\nExecStart={b}/reposuite-gateway serve --data-dir {} --socket {}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
+        p.env_file.display(), p.relay.display(), p.gateway.display(),
+        p.gateway.join("store").display(), p.socket.display());
     let rl = format!("[Unit]\nDescription=RepoSuite Relay (user)\nAfter=reposuite-gateway.service\n\n[Service]\nUMask=0077\nEnvironment=REPOSUITE_HOME={}\nExecStart={b}/reposuite-relay serve\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
         p.root.display());
     let _ = fs::write(p.units.join("reposuite-gateway.service"), gw);
@@ -329,7 +330,9 @@ fn cmd_setup(p: &Paths) {
     let vdir = p.versions.join(VERSION).join("bin");
     mkdir700(&vdir);
     for f in OWNED_BINS { fs::copy(b.join(f), vdir.join(f)).unwrap_or_else(|e| die(&format!("copy {f}: {e}"))); }
-    mkdir700(&p.gateway); mkdir700(&p.relay); mkdir700(&p.gateway.join("cloud"));
+    mkdir700(&p.gateway); mkdir700(&p.relay);
+    mkdir700(&p.gateway.join("store"));   // SQLite store root (strict whitelist)
+    mkdir700(&p.gateway.join("cloud"));   // durable cloud identity/creds
     if let Some(parent) = p.socket.parent() { mkdir700(parent); }
     apply_runtime(p, VERSION, &vdir);
     ok(&format!("setup complete (v{VERSION}) — run 'reposuite doctor', then 'reposuite pair'"));

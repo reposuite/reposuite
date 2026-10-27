@@ -6,6 +6,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with: { node-version: 24 }
+      - run: cargo build --release --locked
       - run: node scripts/smoke-install.js
+      - run: node scripts/test-lifecycle.js
