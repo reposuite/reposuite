@@ -23,8 +23,8 @@ bounded exponential backoff. Gateway works fully offline.
 
 | Repo | Commit |
 |---|---|
-| `reposuite/reposuite` | `30db6b7` (Rust CLI + frozen launcher + pipeline) |
-| `rceman/reposuite-gateway` | `9dccb30` (feature/rsg-project-key-projection) |
+| `reposuite/reposuite` | `a2bd81f` (Rust CLI + frozen launcher + pipeline) |
+| `rceman/reposuite-gateway` | `deec606` (feature/rsg-project-key-projection) |
 | `rceman/reposuite-relay` | `9f1c9cc` (main) |
 
 ## Candidate artifacts (Lead-built, not yet published)
