@@ -279,31 +279,40 @@ struct EchoGuard { fd: i32, saved: libc::termios }
 impl Drop for EchoGuard {
     fn drop(&mut self) { unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved); } }
 }
-fn read_hidden(prompt: &str) -> Option<String> {
+fn read_hidden(prompt: &str) -> Result<String, String> {
     use std::io::BufRead;
-    let tty = fs::OpenOptions::new().read(true).open("/dev/tty").ok();
-    if let Some(f) = tty {
-        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&f);
-        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-        let guard = if unsafe { libc::tcgetattr(fd, &mut saved) } == 0 {
-            let mut raw = saved;
-            raw.c_lflag &= !(libc::ECHO);
-            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
-            Some(EchoGuard { fd, saved })
-        } else { None };
-        eprint!("{prompt}");
-        let mut line = String::new();
-        let r = std::io::BufReader::new(&f).read_line(&mut line);
-        drop(guard);
-        eprintln!();
-        if r.is_ok() { return Some(line.trim().to_string()); }
+    let f = fs::OpenOptions::new().read(true).open("/dev/tty")
+        .map_err(|e| format!("cannot open /dev/tty ({e})"))?;
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(&f);
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // FAIL CLOSED: if the terminal's echo state cannot be read or disabled,
+    // refuse to read the invite rather than typing a secret in cleartext.
+    if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+        return Err("cannot read terminal attributes — refusing to read the invite".into());
     }
-    None
+    let mut raw = saved;
+    raw.c_lflag &= !(libc::ECHO);
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return Err("cannot disable terminal echo — refusing to read the invite".into());
+    }
+    let guard = EchoGuard { fd, saved };
+    eprint!("{prompt}");
+    let mut line = String::new();
+    let r = std::io::BufReader::new(&f).read_line(&mut line);
+    drop(guard);
+    eprintln!();
+    match r {
+        Ok(_) => Ok(line.trim().to_string()),
+        Err(e) => Err(format!("terminal read failed ({e})")),
+    }
 }
 fn read_invite() -> String {
     let stdin_tty = unsafe { libc::isatty(0) } == 1;
     let invite = if stdin_tty {
-        read_hidden("invite (inv_<id>.<secret>): ").unwrap_or_default()
+        match read_hidden("invite (inv_<id>.<secret>): ") {
+            Ok(v) => v,
+            Err(e) => die(&e),
+        }
     } else {
         let mut s = String::new();
         let _ = std::io::stdin().read_to_string(&mut s);
