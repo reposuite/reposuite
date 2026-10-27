@@ -2,79 +2,249 @@ name: release
 on:
   workflow_dispatch:
     inputs:
+      publish:
+        description: "Publish verified artifacts to npm (requires 'release' environment approval)"
+        type: boolean
+        default: false
       tag:
         description: "npm dist-tag"
         type: choice
         options: [beta, latest]
         default: beta
 permissions:
-  contents: write
-  id-token: write            # npm Trusted Publishing (OIDC) — no stored tokens
+  contents: read
+concurrency:
+  group: reposuite-npm-release
+  cancel-in-progress: false
 env:
+  # Release pins are repository variables read ONCE here, validated in the
+  # verify job, and propagated to publish ONLY through job outputs — the
+  # publish job never re-reads mutable repo vars.
+  DISTRIBUTION_SHA: ${{ vars.RELEASE_DISTRIBUTION_SHA }}
   GATEWAY_SHA: ${{ vars.RELEASE_GATEWAY_SHA }}
   RELAY_SHA: ${{ vars.RELEASE_RELAY_SHA }}
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-22.04
-    # Protected environment with required reviewers: publication cannot start
-    # until the Owner approves the deployment. No APPROVE text input.
-    environment: release
+    # Build+verify only. Restricted to main, holds no secrets usable for
+    # publishing and no id-token grant.
+    environment: release-build
+    permissions:
+      contents: read
+    outputs:
+      distribution_sha: ${{ steps.pins.outputs.distribution_sha }}
+      gateway_sha: ${{ steps.pins.outputs.gateway_sha }}
+      relay_sha: ${{ steps.pins.outputs.relay_sha }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.27.1' }   # pinned production toolchain (RSR/RSG)
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with: { node-version: 24, registry-url: https://registry.npmjs.org }
-      - name: npm >= 11.5.1 (Trusted Publishing requirement)
-        run: npm install -g npm@latest && npm --version
-      - name: pinned GitHub SSH host keys
+        with:
+          ref: ${{ env.DISTRIBUTION_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: validate release pins
+        id: pins
+        env:
+          WANT_GATEWAY_SHA: deec606ea7ed6623c666e6116fcc5b8db4257fca
         run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ vars.GITHUB_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          ssh-keygen -F github.com -f ~/.ssh/known_hosts >/dev/null || { echo "pinned host key missing" >&2; exit 1; }
-      # Exactly two private source repos — no Control checkout (no local
-      # binary is built from it). One deploy key per repository.
+          set -euo pipefail
+          hex40() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+          for v in DISTRIBUTION_SHA GATEWAY_SHA RELAY_SHA; do
+            hex40 "${!v}" || { echo "pin $v is not lowercase 40-hex: '${!v}'" >&2; exit 1; }
+          done
+          [ "$GATEWAY_SHA" = "$WANT_GATEWAY_SHA" ] || { echo "gateway pin $GATEWAY_SHA != approved $WANT_GATEWAY_SHA" >&2; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$DISTRIBUTION_SHA" ] || { echo "checkout HEAD != pinned distribution SHA" >&2; exit 1; }
+          echo "distribution_sha=$DISTRIBUTION_SHA" >> "$GITHUB_OUTPUT"
+          echo "gateway_sha=$GATEWAY_SHA" >> "$GITHUB_OUTPUT"
+          echo "relay_sha=$RELAY_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.27.1' }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: '1.93.1' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: toolchain pins (npm 11.21.1 — NOT latest)
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.21.1
+          [ "$(go env GOVERSION)" = go1.27.1 ] || { echo "go toolchain mismatch: $(go env GOVERSION)" >&2; exit 1; }
+          rustc --version | grep -q '^rustc 1\.93\.1 ' || { rustc --version >&2; exit 1; }
+          cargo --version | grep -q '^cargo 1\.93\.1 ' || { cargo --version >&2; exit 1; }
+          [ "$(npm --version)" = 11.21.1 ] || { npm --version >&2; exit 1; }
+      - name: pinned GitHub SSH host key
+        env:
+          RELEASE_SSH_KNOWN_HOSTS: ${{ vars.RELEASE_SSH_KNOWN_HOSTS }}
+          WANT_FP: 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$RELEASE_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          KH="$HOME/.ssh/known_hosts"
+          # Exactly one canonical entry: host literally github.com, key type
+          # ssh-ed25519, no extra fields — then exact official fingerprint.
+          [ "$(wc -l < "$KH")" = 1 ] || { echo "known_hosts must contain exactly one line" >&2; exit 1; }
+          read -r host ktype key extra < "$KH"
+          [ "$host" = github.com ] || { echo "known_hosts host is not literally github.com: $host" >&2; exit 1; }
+          [ "$ktype" = ssh-ed25519 ] || { echo "known_hosts key type is not ssh-ed25519: $ktype" >&2; exit 1; }
+          [ -n "$key" ] && [ -z "$extra" ] || { echo "known_hosts entry has missing/extra fields" >&2; exit 1; }
+          FP=$(ssh-keygen -lf "$KH" | awk '{print $2}')
+          [ "$FP" = "$WANT_FP" ] || { echo "github.com host key fingerprint mismatch: $FP" >&2; exit 1; }
+          echo "github.com host key pinned: $FP"
+      # Exactly two private source repos — deploy keys live only in a
+      # mktemp'd 0600 file for the duration of its own fetch. git init +
+      # fetch of the EXACT pin (no floating remote HEAD clone).
       - name: fetch pinned private sources
         env:
           KEY_GATEWAY: ${{ secrets.RELEASE_KEY_GATEWAY }}
           KEY_RELAY: ${{ secrets.RELEASE_KEY_RELAY }}
+          GATEWAY_BASE: deec606ea7ed6623c666e6116fcc5b8db4257fca
+          RELAY_BASE: 9f1c9ccd758428df65e9b60e85b8b38753a085a9
         run: |
-          clone() { # repo dest sha key
-            printf '%s\n' "$4" > ~/.ssh/key_repo && chmod 600 ~/.ssh/key_repo
-            GIT_SSH_COMMAND="ssh -i ~/.ssh/key_repo -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
-              git clone "git@github.com:$1.git" "$2"
-            git -C "$2" checkout "$3"
-            rm -f ~/.ssh/key_repo
+          set -euo pipefail
+          umask 077
+          KEY=$(mktemp); chmod 600 "$KEY"; trap 'rm -f "$KEY"' EXIT
+          fetch() { # repo dest sha keyvar base
+            printf '%s\n' "${!4}" > "$KEY"
+            mkdir -p "$2" && git -C "$2" init -q
+            git -C "$2" remote add origin "git@github.com:$1.git"
+            GIT_SSH_COMMAND="ssh -F /dev/null -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+              git -C "$2" fetch -q origin "$3"
+            git -C "$2" checkout -q FETCH_HEAD
+            [ "$(git -C "$2" rev-parse HEAD)" = "$3" ] || { echo "$1: HEAD != requested pin" >&2; exit 1; }
+            git -C "$2" cat-file -e "$5^{commit}" 2>/dev/null || \
+              GIT_SSH_COMMAND="ssh -F /dev/null -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+              git -C "$2" fetch -q origin "$5"
           }
-          clone rceman/reposuite-gateway ../reposuite-gateway "$GATEWAY_SHA" "$KEY_GATEWAY"
-          clone rceman/reposuite-relay ../reposuite-relay "$RELAY_SHA" "$KEY_RELAY"
-      - run: bash scripts/release/prepare.sh "$(node -p 'require("./package.json").version')"
-      - run: bash scripts/release/build.sh
-      - run: bash scripts/release/package.sh
-      - run: bash scripts/release/verify.sh
-      - run: node scripts/test-lifecycle.js
-      - name: real install smoke in clean HOME
-        run: |
-          T=$(mktemp -d)
-          export HOME=$T XDG_DATA_HOME=$T/.local/share XDG_CONFIG_HOME=$T/.config XDG_RUNTIME_DIR=$T/run
-          mkdir -p $T/.local/bin $T/run $T/.local/lib && export PATH=$T/.local/bin:$PATH
-          npm config set prefix $T/.local
-          A=$PWD/release-artifacts
-          npm install -g "$A/reposuite-linux-x64-"*.tgz --install-links
-          npm install -g "$A/reposuite-0"*.tgz --install-links
-          reposuite version && reposuite help | grep -q setup
-          for b in reposuite-gateway reposuite-relay; do
-            test -x "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/$b" || { echo "missing $b"; exit 1; }
-          done
-          test ! -e "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/rsc-connector" || { echo "connector must not ship"; exit 1; }
-          reposuite doctor || test $? -eq 1   # expected nonzero pre-service; crash/other code fails
-      - name: publish (OIDC trusted publishing)
+          fetch rceman/reposuite-gateway ../reposuite-gateway "$GATEWAY_SHA" KEY_GATEWAY "$GATEWAY_BASE"
+          fetch rceman/reposuite-relay    ../reposuite-relay    "$RELAY_SHA"    KEY_RELAY    "$RELAY_BASE"
+      - name: release-script regression tests
+        run: python3 scripts/release/test_release.py
+      - name: source contract — application tree frozen
         env:
-          NPM_TAG: ${{ inputs.tag }}          # passed via env, never interpolated into shell
+          DIST_BASE: 033fcfd72ebc14a57592903de7e34458e9ec4d83
+          GATEWAY_BASE: deec606ea7ed6623c666e6116fcc5b8db4257fca
+          RELAY_BASE: 9f1c9ccd758428df65e9b60e85b8b38753a085a9
         run: |
-          case "$NPM_TAG" in beta|latest) ;; *) echo "invalid dist-tag: $NPM_TAG" >&2; exit 1;; esac
-          bash scripts/release/publish.sh --approve
+          set -euo pipefail
+          # Distribution: application sources and the frozen Node launcher
+          # may not change vs the approved base.
+          git cat-file -e "$DIST_BASE^{commit}" || git fetch -q origin "$DIST_BASE"
+          git diff --exit-code "$DIST_BASE" HEAD -- src bin Cargo.toml Cargo.lock package.json
+          # Relay: only *_test.go may differ vs the approved base.
+          git -C ../reposuite-relay diff --exit-code "$RELAY_BASE" HEAD -- . ':(exclude)**/*_test.go'
+          # Gateway: exact pin, same check shape (vacuous by construction).
+          git -C ../reposuite-gateway diff --exit-code "$GATEWAY_BASE" HEAD -- . ':(exclude)**/*_test.go'
+      - name: prepare + build + package + verify
+        run: |
+          set -euo pipefail
+          bash scripts/release/prepare.sh "$(node -p 'require("./package.json").version')"
+          bash scripts/release/build.sh
+          bash scripts/release/package.sh
+          bash scripts/release/verify.sh
+      - run: node scripts/test-lifecycle.js
+      - run: node scripts/smoke-install.js
+      - name: gateway test suite
+        working-directory: ../reposuite-gateway
+        run: |
+          set -euo pipefail
+          go test ./...
+          go test -race -count=1 ./internal/cloud
+      - name: relay test suite
+        working-directory: ../reposuite-relay
+        run: |
+          set -euo pipefail
+          go test ./...
+          go test -race -count=1 ./...
+      - name: install smoke — clean HOME on ubuntu-22.04 (glibc 2.35)
+        run: |
+          set -euo pipefail
+          T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+          export HOME="$T/home" XDG_DATA_HOME="$T/home/.local/share" XDG_CONFIG_HOME="$T/home/.config" XDG_RUNTIME_DIR="$T/run"
+          mkdir -p "$HOME" "$T/run" "$T/prefix" "$T/cache"
+          V=$(node -p 'require("./package.json").version')
+          A="$PWD/release-artifacts"
+          npm install -g --ignore-scripts --no-audit --no-fund --prefix "$T/prefix" --cache "$T/cache" \
+            "$A/reposuite-linux-x64-$V.tgz" "$A/reposuite-$V.tgz"
+          export PATH="$T/prefix/bin:$PATH"
+          reposuite version
+          reposuite help | grep -q setup
+          set +e; reposuite doctor; rc=$?; set -e
+          case $rc in 0|1) ;; *) echo "doctor crashed: rc=$rc" >&2; exit 1;; esac
+          B="$T/prefix/lib/node_modules/@reposuite/linux-x64/bin"
+          for b in reposuite reposuite-gateway reposuite-relay; do
+            [ -x "$B/$b" ] || { echo "missing executable $b" >&2; exit 1; }
+          done
+          [ "$(ls "$B" | grep -c '^reposuite')" = 3 ] || { echo "unexpected extra binary" >&2; exit 1; }
+          [ ! -e "$B/rsc-connector" ] || { echo "connector must not ship" >&2; exit 1; }
+      - name: BUILD_ENVIRONMENT.txt + go1.27.1 binary proof
+        run: |
+          set -euo pipefail
+          B=packages/linux-x64/bin
+          {
+            echo "built: $(date -u +%FT%TZ)"
+            echo "go: $(go env GOVERSION)"
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            echo "gcc: $(gcc --version | head -1)"
+            echo "libc: $(ldd --version | head -1)"
+            echo "node: $(node --version)"
+            echo "npm: $(npm --version)"
+            echo "pins: distribution=$(git rev-parse HEAD) gateway=$GATEWAY_SHA relay=$RELAY_SHA"
+            for b in reposuite reposuite-gateway reposuite-relay; do
+              echo "== $b"
+              go version "$B/$b" || echo "(not a Go binary)"
+              go version -m "$B/$b" || echo "(no module info)"
+            done
+          } > release-artifacts/BUILD_ENVIRONMENT.txt
+          # Both Go service binaries must be compiled by the pinned toolchain.
+          go version "$B/reposuite-gateway" | grep -q ' go1\.27\.1$' || { echo "gateway toolchain mismatch" >&2; exit 1; }
+          go version "$B/reposuite-relay" | grep -q ' go1\.27\.1$' || { echo "relay toolchain mismatch" >&2; exit 1; }
       - uses: actions/upload-artifact@v4
-        with: { name: release-artifacts, path: release-artifacts/, retention-days: 7 }
+        with:
+          name: npm-beta-candidate
+          retention-days: 7
+          path: |
+            release-artifacts/*.tgz
+            release-artifacts/SHA256SUMS
+            release-artifacts/manifest.json
+            release-artifacts/BUILD_ENVIRONMENT.txt
+  publish:
+    needs: verify
+    if: inputs.publish == true
+    runs-on: ubuntu-22.04
+    # Human Owner approval gate — publication cannot start without it.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Pins come from the verified job outputs — never re-read repo vars.
+      DISTRIBUTION_SHA: ${{ needs.verify.outputs.distribution_sha }}
+      GATEWAY_SHA: ${{ needs.verify.outputs.gateway_sha }}
+      RELAY_SHA: ${{ needs.verify.outputs.relay_sha }}
+      NPM_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.distribution_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: assert pinned checkout
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$DISTRIBUTION_SHA" ] || { echo "checkout HEAD != verified distribution SHA" >&2; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@11.21.1 && [ "$(npm --version)" = 11.21.1 ]
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-beta-candidate
+          path: release-artifacts
+      - name: re-verify downloaded artifacts
+        run: bash scripts/release/verify.sh
+      - name: publish exact verified tarballs (OIDC trusted publishing)
+        run: bash scripts/release/publish.sh --approve

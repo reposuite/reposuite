@@ -4,14 +4,14 @@ set -euo pipefail
 V="${1:-}"
 [ -n "$V" ] || { echo "usage: prepare.sh <version>" >&2; exit 1; }
 node -e "const v=require('./package.json').version; if(v!=='$V') {console.error('package.json version '+v+' != $V');process.exit(1)}"
-[ -n "$(git status --porcelain | grep -v '^??')" ] && { echo "prepare: dirty tree" >&2; exit 1; }
+[ -z "$(git status --porcelain --untracked-files=all)" ] || { echo "prepare: dirty or untracked distribution files" >&2; exit 1; }
 : "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
 
 for pair in "gateway:../reposuite-gateway:$GATEWAY_SHA" "relay:../reposuite-relay:$RELAY_SHA"; do
   name="${pair%%:*}"; rest="${pair#*:}"; dir="${rest%%:*}"; want="${rest##*:}"
   a=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || { echo "prepare: $dir missing" >&2; exit 1; }
   [ "$a" = "$want" ] || { echo "prepare: $name SHA mismatch ($a != $want)" >&2; exit 1; }
-  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null | grep -v '^??')" ]; then
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=all)" ]; then
     echo "prepare: $name tree dirty" >&2; exit 1
   fi
 done
