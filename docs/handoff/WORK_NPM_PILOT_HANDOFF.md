@@ -10,7 +10,7 @@ One npm install → ONE CLI (`reposuite`) → TWO local services:
 
 | Component | Form |
 |---|---|
-| `reposuite` | npm CLI (Node ≥18) — setup/doctor/pair/status/start/stop/update/rollback |
+| `reposuite` | **Rust CLI** (canonical; ships in the platform package) — setup/doctor/pair/status/start/stop/update/rollback/migrate/uninstall. The npm entry is a frozen dumb launcher (forwards argv/stdio/signals/exit only) |
 | `reposuite-gateway` | native binary — local authority + **embedded cloud transport** |
 | `reposuite-relay` | native binary — native agent sessions (Codex/Devin/OpenCode) |
 | RSC Control | unchanged cloud service (VPS) — no local install |
@@ -23,8 +23,8 @@ bounded exponential backoff. Gateway works fully offline.
 
 | Repo | Commit |
 |---|---|
-| `reposuite/reposuite` | `eb75230`+ (npm package + CLI; see final publish commit) |
-| `rceman/reposuite-gateway` | `9d0c988` (feature/rsg-project-key-projection) |
+| `reposuite/reposuite` | `30db6b7` (Rust CLI + frozen launcher + pipeline) |
+| `rceman/reposuite-gateway` | `9dccb30` (feature/rsg-project-key-projection) |
 | `rceman/reposuite-relay` | `9f1c9cc` (main) |
 
 ## Candidate artifacts (Lead-built, not yet published)

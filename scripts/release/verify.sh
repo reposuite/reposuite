@@ -5,7 +5,9 @@ OUT=release-artifacts
 (cd "$OUT" && sha256sum -c SHA256SUMS)
 # no Go source or secrets inside tarballs
 for t in "$OUT"/*.tgz; do
-  tar tzf "$t" | grep -E '\.go$|\.env|id_rsa|token' && { echo "verify: forbidden content in $t" >&2; exit 1; } || true
+  if tar tzf "$t" | grep -E '\.go$|\.env|id_rsa|token' >/dev/null; then
+    echo "verify: forbidden content in $t" >&2; exit 1
+  fi
 done
 node -e "const p=require('./package.json'); if(!p.optionalDependencies) process.exit(1)"
 # exactly two native binaries in the platform package, no connector

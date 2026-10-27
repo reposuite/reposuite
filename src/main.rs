@@ -262,7 +262,13 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     write_units(p, bin);
     if !systemd_ok() { ok("systemd --user unavailable — staged only"); return; }
     if !cmd_ok("systemctl", &["--user", "daemon-reload"]) { fail("daemon-reload failed"); }
-    if !svc("enable", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))) { fail("service start failed"); }
+    // enable only installs symlinks — it does NOT start units. Restart them
+    // (start if not running) so the NEW binaries actually execute, then
+    // verify both are active before health polling.
+    let units = OWNED_UNITS.map(|u| u.trim_end_matches(".service"));
+    let _ = svc("enable", &units);
+    if !svc("restart", &units) { fail("service start failed"); }
+    for u in units { if !is_active(u) { fail("service did not become active"); } }
     if env::var("REPOSUITE_FAULT_INJECT").as_deref() == Ok("start") { fail("injected service failure"); }
     if !health_wait(p) { fail("health verification failed"); }
 }
@@ -416,7 +422,12 @@ fn service_op(verb: &str) {
     let units: Vec<&str> = OWNED_UNITS.iter().map(|u| u.trim_end_matches(".service")).collect();
     if !svc(verb, &units) { die(&format!("{verb} failed (systemctl returned nonzero)")); }
     let want = verb != "stop";
-    let bad: Vec<&str> = units.iter().copied().filter(|u| is_active(u) != want).collect();
+    let mut bad: Vec<&str> = units.clone();
+    for _ in 0..40 { // bounded ~20s: Type=simple units pass through 'activating'
+        bad = units.iter().copied().filter(|u| is_active(u) != want).collect();
+        if bad.is_empty() { break; }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     if !bad.is_empty() { die(&format!("{verb} incomplete: {} not {}", bad.join(", "), if want { "active" } else { "stopped" })); }
     ok(&format!("{verb}: {} {}", units.join(", "), if want { "active" } else { "stopped" }));
     cmd_status(&paths());
@@ -475,7 +486,11 @@ fn cmd_update_check() {
 }
 
 fn cmd_uninstall(p: &Paths) {
-    if systemd_ok() { svc("disable", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))); }
+    if systemd_ok() {
+        let units = OWNED_UNITS.map(|u| u.trim_end_matches(".service"));
+        let _ = svc("stop", &units);          // never leave daemons running on deleted state
+        let _ = svc("disable", &units);
+    }
     for u in OWNED_UNITS { let _ = fs::remove_file(p.units.join(u)); }
     if systemd_ok() { let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status(); }
     let _ = fs::remove_file(&p.current);

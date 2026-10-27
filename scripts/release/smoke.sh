@@ -9,8 +9,11 @@ reposuite help | grep -q "setup"
 # doctor output is surfaced, never suppressed; on a host without running
 # daemons it exits nonzero — that is correct fail-closed behavior, so the
 # smoke gate checks that doctor RUNS and reports, not that it passes.
-reposuite doctor; drc=$?
-[ $drc -ge 0 ] || { echo "smoke: doctor crashed" >&2; exit 1; }
+set +e
+reposuite doctor
+drc=$?
+set -e
+case $drc in 0|1) ;; *) echo "smoke: doctor crashed (exit $drc)" >&2; exit 1;; esac
 for b in reposuite reposuite-gateway reposuite-relay; do
   [ -x "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/$b" ] || \
   find "$HOME" -name "$b" -type f | grep -q . || { echo "smoke: $b missing" >&2; exit 1; }

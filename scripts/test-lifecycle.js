@@ -31,11 +31,17 @@ function setupEnv(t, version) {
   // fake systemctl shim
   const bin = path.join(t, 'shim'); fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'systemctl'), `#!/bin/sh
-case "$1" in --user) shift;; esac
-verb="$1"; shift
-case "$verb" in
-  daemon-reload|enable|start|stop|restart|list-units) exit 0;;
-  is-active) echo active; exit 0;;
+# realistic shim: enable installs only; start/restart/stop change state;
+# is-active reads state. FAKE_SYSTEMCTL_FAIL=<verb> injects failure.
+STATE="\$HOME/.fake-services"
+case "\$1" in --user) shift;; esac
+verb="\$1"; shift
+if [ "\$FAKE_SYSTEMCTL_FAIL" = "\$verb" ]; then exit 1; fi
+case "\$verb" in
+  daemon-reload|list-units|enable) exit 0;;
+  is-active) [ -f "\$STATE" ] && grep -qx "\$1" "\$STATE" && { echo active; exit 0; }; echo inactive; exit 0;;
+  start|restart) for u in "\$@"; do echo "\$u" >> "\$STATE"; done; exit 0;;
+  stop) for u in "\$@"; do sed -i "/^\$u\$/d" "\$STATE" 2>/dev/null || true; done; exit 0;;
   *) exit 0;;
 esac
 `, { mode: 0o755 });
