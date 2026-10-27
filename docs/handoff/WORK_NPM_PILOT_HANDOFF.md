@@ -1,0 +1,96 @@
+# WORK Pilot Handoff — RepoSuite npm Beta (two-service runtime)
+
+Date: 2026-10-27 · Target: WORK PC (Ubuntu 22.04.5, native Linux)
+Status: **candidate** — pending independent review verdict + Owner approval to publish.
+Do not install on WORK before the Owner authorizes the published beta.
+
+## What WORK gets
+
+One npm install → ONE CLI (`reposuite`) → TWO local services:
+
+| Component | Form |
+|---|---|
+| `reposuite` | npm CLI (Node ≥18) — setup/doctor/pair/status/start/stop/update/rollback |
+| `reposuite-gateway` | native binary — local authority + **embedded cloud transport** |
+| `reposuite-relay` | native binary — native agent sessions (Codex/Devin/OpenCode) |
+| RSC Control | unchanged cloud service (VPS) — no local install |
+
+The former `rsc-connector` binary/service is gone; its WSS/pairing/heartbeat/epoch
+logic now runs inside Gateway (`internal/cloud`), optional and supervised, with
+bounded exponential backoff. Gateway works fully offline.
+
+## Exact pins (release candidate)
+
+| Repo | Commit |
+|---|---|
+| `reposuite/reposuite` | `eb75230`+ (npm package + CLI; see final publish commit) |
+| `rceman/reposuite-gateway` | `9d0c988` (feature/rsg-project-key-projection) |
+| `rceman/reposuite-relay` | `9f1c9cc` (main) |
+
+## Candidate artifacts (Lead-built, not yet published)
+
+```
+reposuite-0.3.0-beta.1.tgz                  sha256 5c9dc1f77e2788b3e7dfb7e2f19653eb22d6587f9572300b79b3149844014242
+reposuite-linux-x64-0.3.0-beta.1.tgz        sha256 7f996d8db268f4e061716bc612fae625c68d93664030e22d2ce4ba1462d0575b
+```
+
+Reproduce from source (verified build): clone the three repos at the pins,
+then `GATEWAY_SHA=… RELAY_SHA=… bash scripts/release/{prepare,build,package,verify}.sh`.
+The builder refuses dirty/untracked/mismatched trees.
+
+## Install sequence (after Owner approval + npm publish)
+
+```bash
+npm install -g reposuite@beta
+reposuite setup          # versioned runtime + 2 systemd user services (no sudo)
+reposuite doctor         # pre-pair checks; expect FAIL only on pairing/online
+reposuite pair           # invite typed at a hidden prompt (or piped stdin) —
+                         # travels only over the local Unix socket
+reposuite status         # expect: paired yes, cloud online yes
+```
+
+Project-bound agent execution (Owner-approved pilot project only):
+
+```bash
+reposuite-gateway project create --code PILOT --name pilot \
+  --source-remote <git-url> --source-branch main
+reposuite-gateway project bind-workspace --project <key> \
+  --path /abs/scratch/checkout --agent-exec true
+```
+
+Then create a native Codex session through RSC Cloud/MCP with
+`project:<key>` — the connector resolves the admitted workspace; unbound or
+unauthorized projects fail closed (`project_workspace_not_bound`,
+`agent_exec_denied`).
+
+## What must be proven ON WORK (not provable in CI)
+
+1. Real first pairing with an Owner-issued invite (10-min TTL)
+2. Gateway Online in RepoSuite Control (authenticated WSS, independently observed)
+3. One real native Codex turn with a real transcript
+4. Denial: unbound project and unauthorized workspace both fail closed
+5. Service restart + reboot persistence (linger already enabled on WORK)
+6. `npm update -g` + `reposuite update apply` and `rollback` across two published versions
+
+## Proven in CI/local (not a substitute for the above)
+
+- Two-binary contract, package installation smoke, lifecycle fault-injection
+  (transactional activation/rollback), cloud state race test (`go test -race`),
+  manifest/hash verification, connector-absent assertion.
+
+## Boundaries
+
+- No root, no inbound ports, no touching `~/.airelay` or existing agent sessions
+- State: `~/.local/share/reposuite/` (unified), credentials 0600
+- `reposuite uninstall` preserves state; `purge-state` requires explicit confirm
+
+## Owner-only actions
+
+1. Configure npm Trusted Publishing for BOTH packages (`reposuite`,
+   `@reposuite/linux-x64`) and create the protected `release` environment
+   with required reviewers.
+2. Add repo secrets `RELEASE_KEY_GATEWAY`, `RELEASE_KEY_RELAY` (one deploy key
+   per private repo) and var `GITHUB_SSH_KNOWN_HOSTS` (pinned host keys).
+3. Approve the first beta publication.
+4. Issue the WORK invite shortly before `reposuite pair` on WORK.
+5. Authorize `rsg_help` to install and run the pilot.

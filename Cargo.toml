@@ -1,0 +1,14 @@
+[package]
+name = "reposuite"
+version = "0.3.0-beta.1"
+edition = "2021"
+description = "RepoSuite CLI — canonical user interface for the local runtime"
+license = "MIT"
+
+[dependencies]
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+strip = true

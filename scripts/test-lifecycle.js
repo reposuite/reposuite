@@ -13,7 +13,12 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 
-const CLI = path.join(__dirname, '..', 'bin', 'reposuite.js');
+// canonical CLI = the Rust binary (REPOSUITE_CLI override for CI layouts)
+const CLI = process.env.REPOSUITE_CLI || path.join(__dirname, '..', 'target', 'release', 'reposuite');
+if (!require('fs').existsSync(CLI)) {
+  console.error('lifecycle: Rust CLI not built at ' + CLI + ' — run: cargo build --release');
+  process.exit(2);
+}
 let fail = 0;
 const chk = (n, ok) => { console.log(` ${ok ? ' ok ' : 'FAIL'} ${n}`); if (!ok) fail = 1; };
 
@@ -63,7 +68,7 @@ function pkgBin(t) {
 }
 
 function run(t, env, args) {
-  return spawnSync('node', [CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
+  return spawnSync(CLI, args, { env, encoding: 'utf8', timeout: 60000 });
 }
 
 // health server runs in a CHILD process: spawnSync in this process blocks

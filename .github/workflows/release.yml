@@ -21,6 +21,7 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with: { node-version: 24, registry-url: https://registry.npmjs.org }
       - name: npm >= 11.5.1 (Trusted Publishing requirement)

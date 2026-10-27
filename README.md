@@ -63,8 +63,11 @@ CLI + packaging: MIT. Native platform binaries: proprietary (see LICENSE.md).
 
 ## Architecture note
 
-`bin/reposuite.js` is the single canonical `reposuite` CLI. A future
-compiled Rust CLI may be shipped as a native payload inside the platform
-package (`packages/linux-x64/bin/`) — the JS file then delegates to it —
-but there is only ever ONE user-facing `reposuite` command; no competing
-implementations exist in this repository.
+The canonical `reposuite` CLI is the **Rust binary** (`src/main.rs`),
+shipped in the platform package. The npm entry point
+(`bin/reposuite.js`) is a minimal launcher: it resolves the native binary
+and forwards argv, stdio, signals and exit status — it implements no
+product logic. There is exactly one `reposuite` command implementation.
+
+Local services remain Go: `reposuite-gateway` (local authority + embedded
+cloud transport) and `reposuite-relay` (native agent sessions).
