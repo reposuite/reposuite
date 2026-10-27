@@ -11,22 +11,29 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync, execSync, spawnSync } = require('child_process');
+const http = require('http');
 
 const HOME = os.homedir();
 const XDG_DATA = process.env.XDG_DATA_HOME || path.join(HOME, '.local', 'share');
 const XDG_CONF = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const XDG_RUNTIME = process.env.XDG_RUNTIME_DIR || path.join(HOME, '.reposuite', 'run');
-const VERSIONS = path.join(XDG_DATA, 'reposuite', 'versions');
-const CURRENT = path.join(XDG_DATA, 'reposuite', 'current');  // symlink -> versions/<v>
-const RSG_DIR = path.join(XDG_DATA, 'reposuite-gateway');
-const RSR_HOME = path.join(HOME, '.reposuite', 'relay');
-const CONN_DIR = path.join(XDG_DATA, 'rsc-connector');
-const ENV_FILE = path.join(XDG_DATA, 'rsc-connector.env');
-const SOCKET = path.join(XDG_RUNTIME, 'reposuite-gateway', 'host.sock');
+const ROOT = path.join(XDG_DATA, 'reposuite');            // unified XDG namespace
+const VERSIONS = path.join(ROOT, 'versions');
+const CURRENT = path.join(ROOT, 'current');               // symlink -> versions/<v>
+const RSG_DIR = path.join(ROOT, 'gateway');               // gateway/{store,cloud}
+const RSR_HOME = path.join(ROOT, 'relay');                // relay/{config,sessions}
+const ENV_FILE = path.join(ROOT, 'gateway.env');
+const SOCKET = path.join(XDG_RUNTIME, 'reposuite', 'gateway.sock');
 const UNITS = path.join(XDG_CONF, 'systemd', 'user');
-const WSS = process.env.RSC_WS_URL || 'wss://app.reposuite.com/gateway';
-const OWNED_BINS = ['reposuite-gateway', 'reposuite-relay', 'rsc-connector'];
-const OWNED_UNITS = ['reposuite-rsg.service', 'reposuite-rsr.service', 'reposuite-connector.service'];
+const WSS = process.env.REPOSUITE_CLOUD_WSS || process.env.RSC_WS_URL || 'wss://app.reposuite.com/gateway';
+const OWNED_BINS = ['reposuite-gateway', 'reposuite-relay'];
+const OWNED_UNITS = ['reposuite-gateway.service', 'reposuite-relay.service'];
+// legacy (pre-unified) state roots — migrated once, idempotently
+const LEGACY = [
+  [path.join(XDG_DATA, 'reposuite-gateway'), path.join(RSG_DIR, 'store')],
+  [path.join(HOME, '.reposuite', 'relay'), RSR_HOME],
+  [path.join(XDG_DATA, 'rsc-connector'), path.join(RSG_DIR, 'cloud')],
+];
 const VERSION = require('../package.json').version;
 
 const die = (m, c = 1) => { console.error(`reposuite: ${m}`); process.exit(c); };
@@ -45,7 +52,30 @@ const isActive = u => {
   catch { return false; }
 };
 const mkdir = d => fs.mkdirSync(d, { recursive: true, mode: 0o700 });
-const paired = () => fs.existsSync(path.join(CONN_DIR, 'gateway.json'));
+const CREDS = path.join(RSG_DIR, 'cloud', 'gateway.json');
+const paired = () => fs.existsSync(CREDS);
+function cloudStatus() {
+  // authenticated local read over the owner-only Unix socket
+  return new Promise((resolve) => {
+    const req = http.request({ socketPath: SOCKET, path: '/v1/cloud/status', method: 'GET' }, res => {
+      let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+    });
+    req.on('error', () => resolve(null)); req.setTimeout(4000, () => { req.destroy(); resolve(null); }); req.end();
+  });
+}
+function cloudPair(invite) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ invite });
+    const req = http.request({ socketPath: SOCKET, path: '/v1/cloud/pair', method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { let j = {}; try { j = JSON.parse(d); } catch {} 
+        if (res.statusCode === 200) resolve(j); else reject(new Error(j.error && j.error.message || 'pair failed http ' + res.statusCode)); });
+    });
+    req.on('error', reject); req.setTimeout(20000, () => { req.destroy(); reject(new Error('gateway socket timeout')); });
+    req.end(body);
+  });
+}
 
 // Two distinct binary sources — never conflate:
 //  pkgBinDir(): binaries inside THIS installed npm package (the new version).
@@ -107,16 +137,30 @@ function runningSessions() {
   }
 }
 
+// migrateLegacy: one-time, idempotent, never overwrites existing data.
+function migrateLegacy() {
+  for (const [from, to] of LEGACY) {
+    if (!fs.existsSync(from)) continue;
+    if (fs.existsSync(to) && fs.readdirSync(to).length) { console.log(`  legacy ${from} left in place (target populated)`); continue; }
+    try {
+      mkdir(path.dirname(to));
+      fs.renameSync(from, to);
+      console.log(`  migrated ${from} -> ${to}`);
+    } catch (e) { console.log(`  legacy ${from} not migrated (${e.code || e.message})`); }
+  }
+}
+
 function writeUnits(bin) {
   mkdir(UNITS);
-  const sock = path.join(XDG_RUNTIME, 'reposuite-gateway', 'host.sock');
-  fs.writeFileSync(path.join(UNITS, 'reposuite-rsg.service'), `[Unit]
+  fs.writeFileSync(path.join(UNITS, 'reposuite-gateway.service'), `[Unit]
 Description=RepoSuite Gateway (user)
 After=default.target
 
 [Service]
 UMask=0077
-ExecStart=${bin}/reposuite-gateway serve --data-dir ${RSG_DIR} --socket ${sock}
+EnvironmentFile=${ENV_FILE}
+Environment=REPOSUITE_RSR_HOME=${RSR_HOME}
+ExecStart=${bin}/reposuite-gateway serve --data-dir ${RSG_DIR} --socket ${SOCKET}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
@@ -124,13 +168,13 @@ NoNewPrivileges=yes
 [Install]
 WantedBy=default.target
 `);
-  fs.writeFileSync(path.join(UNITS, 'reposuite-rsr.service'), `[Unit]
+  fs.writeFileSync(path.join(UNITS, 'reposuite-relay.service'), `[Unit]
 Description=RepoSuite Relay (user)
-After=reposuite-rsg.service
+After=reposuite-gateway.service
 
 [Service]
 UMask=0077
-Environment=REPOSUITE_HOME=${HOME}/.reposuite
+Environment=REPOSUITE_HOME=${ROOT}
 ExecStart=${bin}/reposuite-relay serve
 Restart=on-failure
 RestartSec=3
@@ -139,25 +183,8 @@ NoNewPrivileges=yes
 [Install]
 WantedBy=default.target
 `);
-  fs.writeFileSync(path.join(UNITS, 'reposuite-connector.service'), `[Unit]
-Description=RepoSuite Connector (user)
-After=reposuite-rsr.service reposuite-rsg.service
-Requires=reposuite-rsr.service reposuite-rsg.service
-
-[Service]
-UMask=0077
-EnvironmentFile=${ENV_FILE}
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -f ${RSR_HOME}/config/api.token ] && exit 0; sleep 1; done; exit 1'
-ExecStart=${bin}/rsc-connector -server \${RSC_WS_URL} -state ${CONN_DIR} -rsg-socket ${sock} -rsr-home ${RSR_HOME} -label \${RSC_GATEWAY_LABEL} -agent-version \${RSC_AGENT_VERSION}
-Restart=on-failure
-RestartSec=5
-NoNewPrivileges=yes
-
-[Install]
-WantedBy=default.target
-`);
   fs.writeFileSync(ENV_FILE,
-    `RSC_WS_URL=${WSS}\nRSC_GATEWAY_LABEL=${os.hostname()}\nRSC_AGENT_VERSION=rsc-connector/${VERSION}\n`,
+    `REPOSUITE_CLOUD_WSS=${WSS}\nREPOSUITE_GATEWAY_LABEL=${os.hostname()}\n`,
     { mode: 0o600 });
 }
 
@@ -165,94 +192,90 @@ const cmds = {
   setup() {
     const b = pkgBinDir();
     if (!b) die('native binaries not found — is the platform package installed?');
-    // install this package's binaries into a versioned runtime dir, then
-    // atomically activate — updates never delete a running path
+    mkdir(ROOT); migrateLegacy();
+    const switching = currentVersion() && currentVersion() !== VERSION;
+    if (switching && isActive('reposuite-relay')) {
+      const s = runningSessions();
+      if (s !== 0) die(s > 0 ? `${s} agent session(s) running — setup staged; run 'reposuite update apply' later`
+                             : 'Relay state unknown — staging only (fail closed)');
+    }
     const vdir = path.join(VERSIONS, VERSION);
     mkdir(path.join(vdir, 'bin'));
     for (const f of OWNED_BINS) fs.copyFileSync(path.join(b, f), path.join(vdir, 'bin', f));
-    activate(VERSION);
-    mkdir(RSG_DIR); mkdir(RSR_HOME); mkdir(CONN_DIR); mkdir(path.dirname(SOCKET));
-    for (const d of [RSG_DIR, RSR_HOME, CONN_DIR]) try { fs.chmodSync(d, 0o700); } catch {}
+    const prev = currentVersion();
+    try { activate(VERSION); } catch (e) { if (prev) try { activate(prev); } catch {} die('activation failed: ' + e.message); }
+    mkdir(RSG_DIR); mkdir(RSR_HOME); mkdir(path.join(RSG_DIR, 'cloud')); mkdir(path.dirname(SOCKET));
+    for (const d of [ROOT, RSG_DIR, RSR_HOME, path.join(RSG_DIR, 'cloud')]) try { fs.chmodSync(d, 0o700); } catch {}
     writeUnits(path.join(vdir, 'bin'));
     if (!systemdOK()) { ok('systemd --user unavailable — units staged; start manually'); return; }
     execSync('systemctl --user daemon-reload');
-    if (!svc('enable', '--now', ...OWNED_UNITS.map(u => u.replace('.service', ''))))
-      die(`unit enable failed — units at ${UNITS}`);
+    if (!svc('enable', '--now', ...OWNED_UNITS.map(u => u.replace('.service', '')))) {
+      if (prev) try { activate(prev); } catch {}
+      die(`unit enable failed — units at ${UNITS}${prev ? ' (previous version restored)' : ''}`);
+    }
     ok(`setup complete (v${VERSION}) — run 'reposuite doctor', then 'reposuite pair'`);
   },
 
-  pair() {
-    if (paired()) return ok(`already paired (${CONN_DIR}/gateway.json)`);
-    // protected input: stdin pipe or hidden prompt — NEVER argv/env/history
+  async pair() {
+    if (paired()) return ok('already paired — revocation is a Control-side action');
     let invite;
-    if (!process.stdin.isTTY) {
-      invite = fs.readFileSync(0, 'utf8').trim();
-    } else {
-      // hidden interactive entry: raw-mode readline, echo muted
-      invite = '';
-      const rl = require('readline').createInterface({ input: process.stdin, output: process.stderr, terminal: true });
-      rl._writeToOutput = () => {};           // mute echo
+    if (!process.stdin.isTTY) invite = fs.readFileSync(0, 'utf8').trim();
+    else {
       process.stderr.write('invite (inv_<id>.<secret>): ');
-      invite = require('child_process').execSync('stty -echo; head -n1; stty echo', { shell: '/bin/sh', encoding: 'utf8' }).trim();
-      rl.close();
+      invite = execSync('stty -echo; head -n1; stty echo', { shell: '/bin/sh', encoding: 'utf8' }).trim();
       process.stderr.write('\n');
     }
     if (!/^inv_[\w-]+\.[\w-]+$/.test(invite)) die('malformed invite');
-    mkdir(CONN_DIR); fs.chmodSync(CONN_DIR, 0o700);
-    const ifile = path.join(CONN_DIR, `.invite.${process.pid}`);
-    fs.writeFileSync(ifile, invite, { mode: 0o600 });
-    const b = installedBinDir() || pkgBinDir();
-    const was = isActive('reposuite-connector'); if (was) svc('stop', 'reposuite-connector');
-    const p = spawnSync(path.join(b, 'rsc-connector'),
-      ['-server', WSS, '-invite-file', ifile, '-state', CONN_DIR,
-       '-rsg-socket', SOCKET, '-rsr-home', RSR_HOME, '-label', os.hostname()],
-      { timeout: 45000, stdio: 'ignore' });
-    try { fs.unlinkSync(ifile); } catch {}
-    if (was) svc('start', 'reposuite-connector');
-    if (!paired()) die('pairing failed: no durable gateway.json (expired/refused invite?)');
-    let j; try { j = JSON.parse(fs.readFileSync(path.join(CONN_DIR, 'gateway.json'), 'utf8')); }
-    catch { die('gateway.json present but unparseable — identity unverified'); }
-    if (!(j.credential || j.token || j.key || j.gateway)) die('gateway.json lacks gateway credential — unverified');
-    ok('paired — durable credential + gateway identity stored');
+    // the invite travels ONLY over the owner-only Unix socket (local IPC)
+    let st;
+    try { st = await cloudPair(invite); } catch (e) { die('pairing failed: ' + e.message); }
+    if (!st || !st.paired) die('pairing did not produce durable gateway identity');
+    for (let i = 0; i < 20; i++) {
+      const s = await cloudStatus();
+      if (s && s.online) return ok(`paired + online (gateway ${s.gateway_key || '?'})`);
+      await new Promise(r => setTimeout(r, 500));
+    }
+    const s = await cloudStatus();
+    ok(`paired (durable identity stored)${s && s.last_error ? ' — cloud: ' + s.last_error : ''}`);
+    console.log('  note: online not yet observed — check: reposuite status');
   },
 
-  doctor() {
+  async doctor() {
     let fail = 0;
-    const chk = (name, fn) => { const r = (() => { try { return !!fn(); } catch { return false; } })();
-      console.log(` ${r ? ' ok ' : 'FAIL'} ${name}`); if (!r) fail = 1; };
+    const chk = (name, v) => { console.log(` ${v ? ' ok ' : 'FAIL'} ${name}`); if (!v) fail = 1; };
     console.log('reposuite doctor  (v' + VERSION + ')');
     console.log(' pre-pair:');
-    chk('linux platform', () => process.platform === 'linux');
-    chk('native binaries', () => !!pkgBinDir() || !!installedBinDir());
-    chk('provider cli (any)', () => ['codex', 'devin', 'opencode'].some(have));
-    chk('systemd --user', systemdOK);
-    console.log(' post-pair/service:');
-    chk('rsg socket live', () => fs.existsSync(SOCKET));
-    chk('rsr api.token 0600', () => {
+    chk('linux platform', process.platform === 'linux');
+    chk('native binaries', !!pkgBinDir() || !!installedBinDir());
+    chk('provider cli (any)', ['codex', 'devin', 'opencode'].some(have));
+    chk('systemd --user', systemdOK());
+    console.log(' services:');
+    chk('gateway service active', !systemdOK() || isActive('reposuite-gateway'));
+    chk('relay service active', !systemdOK() || isActive('reposuite-relay'));
+    chk('gateway socket live', fs.existsSync(SOCKET));
+    chk('relay api.token 0600', (() => {
       const t = path.join(RSR_HOME, 'config', 'api.token');
       return fs.existsSync(t) && (fs.statSync(t).mode & 0o777) === 0o600;
-    });
-    chk('rsr api v2 live', () => {
-      const tok = fs.readFileSync(path.join(RSR_HOME, 'config', 'api.token'), 'utf8').trim();
-      const port = JSON.parse(fs.readFileSync(path.join(RSR_HOME, 'config', 'relay.json'), 'utf8')).listenPort;
-      const out = execFileSync('wget', ['-qO-', `--header=Authorization: Bearer ${tok}`,
-        `http://127.0.0.1:${port}/v1/daemon`], { encoding: 'utf8', timeout: 5000 });
-      return /apiVersion["\s:]*2/.test(out);
-    });
-    chk('connector creds stored', paired);
-    if (paired()) chk('connector service running', () => !systemdOK() || isActive('reposuite-connector'));
-    console.log(' connectivity (observed):',
-      systemdOK() && isActive('reposuite-connector')
-        ? 'service active — see journalctl --user -u reposuite-connector'
-        : 'connector not running — cloud connectivity UNKNOWN');
+    })());
+    console.log(' cloud:');
+    const cs = await cloudStatus();
+    if (!cs) { chk('gateway cloud status reachable', false); }
+    else {
+      chk('cloud transport enabled', !!cs.enabled);
+      chk('gateway paired (durable identity)', !!cs.paired);
+      if (cs.paired) chk('cloud ONLINE (authenticated WSS)', !!cs.online);
+      if (cs.last_error) console.log('  info last cloud error: ' + cs.last_error);
+    }
     process.exit(fail);
   },
 
-  status() {
+  async status() {
     for (const u of OWNED_UNITS.map(u => u.replace('.service', '')))
-      console.log(`${u.padEnd(22)} ${isActive(u) ? 'active' : 'inactive'}`);
-    console.log(`pairing:               ${paired() ? 'paired' : 'NOT paired'}`);
-    console.log(`activated version:     ${currentVersion() || 'none'}`);
+      console.log(`${u.padEnd(24)} ${isActive(u) ? 'active' : 'inactive'}`);
+    const cs = await cloudStatus();
+    console.log(`paired:                 ${cs && cs.paired ? 'yes' : 'no'}`);
+    console.log(`cloud online:           ${cs && cs.online ? 'yes' : 'no'}${cs && cs.gateway_key ? '  (' + cs.gateway_key + ')' : ''}`);
+    console.log(`activated version:      ${currentVersion() || 'none'}`);
   },
 
   start() { svc('start', ...OWNED_UNITS.map(u => u.replace('.service', ''))); cmds.status(); },
@@ -283,7 +306,7 @@ const cmds = {
     const vdir = path.join(VERSIONS, v);
     mkdir(path.join(vdir, 'bin'));
     for (const f of OWNED_BINS) fs.copyFileSync(path.join(b, f), path.join(vdir, 'bin', f));
-    activate(v);
+    try { activate(v); } catch (e) { if (cur) try { activate(cur); } catch {} die('activation failed: ' + e.message); }
     writeUnits(path.join(vdir, 'bin'));
     if (systemdOK()) { execSync('systemctl --user daemon-reload'); cmds.restart(); }
     ok(`activated ${v}${cur && cur !== v ? ` (previous ${cur} kept for rollback)` : ''}`);
@@ -294,7 +317,9 @@ const cmds = {
     const versions = fs.readdirSync(VERSIONS).filter(v => v !== cur).sort(cmpVer).reverse();
     if (!versions.length) die('no previous version to roll back to');
     const target = versions[0];
-    if (runningSessions() > 0) die('active sessions — stop first');
+    const s = runningSessions();
+    if (s !== 0) die(s > 0 ? `${s} agent session(s) running — stop them first`
+                            : 'Relay state unknown — refusing rollback (fail closed)');
     activate(target);
     writeUnits(path.join(VERSIONS, target, 'bin'));
     if (systemdOK()) { execSync('systemctl --user daemon-reload'); cmds.restart(); }
@@ -308,22 +333,22 @@ const cmds = {
     // state preserved: versions dir, projects, creds all kept — use
     // 'purge-state' (explicit) to remove them.
     try { fs.unlinkSync(CURRENT); } catch {}
-    ok('units + activation removed; state preserved under ' + path.join(XDG_DATA, 'reposuite'));
+    ok('units + activation removed; state preserved under ' + ROOT);
     console.log('  full state removal: reposuite purge-state');
   },
 
   'purge-state': () => {
     if (args.includes('--yes') !== true) {
       console.log('purge-state permanently removes:');
-      for (const d of [RSG_DIR, path.join(HOME, '.reposuite'), CONN_DIR, path.join(XDG_DATA, 'reposuite')])
+      for (const d of [ROOT, path.join(XDG_DATA, 'reposuite-gateway'), path.join(HOME, '.reposuite'), path.join(XDG_DATA, 'rsc-connector')])
         console.log('  ' + d);
       if (!process.stdin.isTTY) die('non-interactive: pass --yes to confirm');
       const a = fs.readFileSync(0, 'utf8').trim();
       if (a !== 'purge') die('aborted');
     }
     cmds.uninstall();
-    for (const d of [RSG_DIR, path.join(HOME, '.reposuite'), CONN_DIR,
-                     path.join(XDG_DATA, 'reposuite'), ENV_FILE])
+    for (const d of [ROOT, path.join(XDG_DATA, 'reposuite-gateway'),
+                     path.join(HOME, '.reposuite'), path.join(XDG_DATA, 'rsc-connector'), ENV_FILE])
       try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
     ok('RepoSuite state purged (owned roots only; unrelated state untouched)');
   },
@@ -349,4 +374,4 @@ const cmd = args.join('-') === 'update-check' || args[0] === 'update' && args[1]
   : args.join('-') === 'update-apply' || args[0] === 'update' && args[1] === 'apply' ? 'update-apply'
   : args[0];
 const fn = cmds[cmd] || cmds.help;
-fn(...args.slice(1));
+Promise.resolve(fn(...args.slice(1))).catch(e => die(e.message));

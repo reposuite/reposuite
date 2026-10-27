@@ -14,6 +14,14 @@ chk('name=reposuite', () => pkg.name === 'reposuite');
 chk('bin wired', () => pkg.bin && pkg.bin.reposuite === 'bin/reposuite.js');
 chk('engines node>=18', () => (pkg.engines && pkg.engines.node) === '>=18');
 chk('platform package declared', () => pkg.optionalDependencies && pkg.optionalDependencies['@reposuite/linux-x64']);
+chk('two-service contract', () => {
+  const cli = require('fs').readFileSync(require('path').join(__dirname, '..', 'bin', 'reposuite.js'), 'utf8');
+  const bins = (cli.match(/const OWNED_BINS = \[([^\]]*)\]/) || [])[1] || '';
+  const units = (cli.match(/const OWNED_UNITS = \[([^\]]*)\]/) || [])[1] || '';
+  return /reposuite-gateway/.test(bins) && /reposuite-relay/.test(bins)
+    && !/rsc-connector/.test(bins) && !/connector\.service/.test(units)
+    && (units.match(/\.service/g) || []).length === 2;
+});
 chk('proprietary license field', () => /SEE LICENSE/.test(pkg.license));
 chk('no postinstall side effects', () => !(pkg.scripts && /postinstall/.test(JSON.stringify(pkg.scripts))));
 
