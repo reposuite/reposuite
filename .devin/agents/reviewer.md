@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Independent adversarial release reviewer — reads code at pinned commits, runs the test suites, and returns READY/NEEDS_REWORK with file:line findings. Never modifies files.
-model: gemini
+model: gemini-4-argon
 allowed-tools:
   - read
   - grep
