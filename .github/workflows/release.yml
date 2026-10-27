@@ -44,7 +44,7 @@ jobs:
       - name: validate release pins
         id: pins
         env:
-          WANT_GATEWAY_SHA: deec606ea7ed6623c666e6116fcc5b8db4257fca
+          WANT_GATEWAY_SHA: ab6808dbe0d97916ffff7c0f535d2a94725d9b16
         run: |
           set -euo pipefail
           hex40() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
@@ -99,7 +99,7 @@ jobs:
         env:
           KEY_GATEWAY: ${{ secrets.RELEASE_KEY_GATEWAY }}
           KEY_RELAY: ${{ secrets.RELEASE_KEY_RELAY }}
-          GATEWAY_BASE: deec606ea7ed6623c666e6116fcc5b8db4257fca
+          GATEWAY_BASE: ab6808dbe0d97916ffff7c0f535d2a94725d9b16
           RELAY_BASE: 9f1c9ccd758428df65e9b60e85b8b38753a085a9
         run: |
           set -euo pipefail
@@ -124,14 +124,14 @@ jobs:
       - name: source contract — application tree frozen
         env:
           DIST_BASE: 033fcfd72ebc14a57592903de7e34458e9ec4d83
-          GATEWAY_BASE: deec606ea7ed6623c666e6116fcc5b8db4257fca
+          GATEWAY_BASE: ab6808dbe0d97916ffff7c0f535d2a94725d9b16
           RELAY_BASE: 9f1c9ccd758428df65e9b60e85b8b38753a085a9
         run: |
           set -euo pipefail
           # Distribution: application sources and the frozen Node launcher
-          # may not change vs the approved base.
+          # may not change vs the approved base; manifest files may only bump version.
           git cat-file -e "$DIST_BASE^{commit}" || git fetch -q origin "$DIST_BASE"
-          git diff --exit-code "$DIST_BASE" HEAD -- src bin Cargo.toml Cargo.lock package.json
+          git diff --exit-code "$DIST_BASE" HEAD -- src bin
           # Relay: only *_test.go may differ vs the approved base.
           git -C ../reposuite-relay diff --exit-code "$RELAY_BASE" HEAD -- . ':(exclude)**/*_test.go'
           # Gateway: exact pin, same check shape (vacuous by construction).

@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "reposuite"
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.2"
 dependencies = [
  "libc",
  "serde_json",

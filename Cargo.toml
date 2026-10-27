@@ -1,6 +1,6 @@
 [package]
 name = "reposuite"
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.2"
 edition = "2021"
 description = "RepoSuite CLI — canonical user interface for the local runtime"
 license = "MIT"

@@ -1,6 +1,6 @@
 {
   "name": "reposuite",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.2",
   "description": "RepoSuite \u2014 a cloud-managed AI development platform connecting your computers, projects, and AI agents into one workspace.",
   "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://reposuite.com",
@@ -37,7 +37,7 @@
     "CHANGELOG.md"
   ],
   "optionalDependencies": {
-    "@reposuite/linux-x64": "0.3.0-beta.1"
+    "@reposuite/linux-x64": "0.3.0-beta.2"
   },
   "scripts": {
     "test": "node scripts/smoke-install.js && node scripts/test-lifecycle.js"
