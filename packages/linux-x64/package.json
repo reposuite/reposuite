@@ -1,0 +1,10 @@
+{
+  "name": "@reposuite/linux-x64",
+  "version": "0.3.0-beta.1",
+  "description": "RepoSuite native binaries (Linux x64) — internal platform package.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/"],
+  "publishConfig": { "access": "restricted" }
+}

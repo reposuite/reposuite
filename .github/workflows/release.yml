@@ -1,0 +1,20 @@
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      approve: { description: "type APPROVE to publish", required: true }
+      tag: { description: "npm dist-tag", default: beta }
+permissions:
+  contents: write
+  id-token: write          # npm Trusted Publishing (OIDC)
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    if: github.event.inputs.approve == 'APPROVE'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: https://registry.npmjs.org }
+      - run: node scripts/smoke-install.js
+      - run: NPM_TAG=${{ github.event.inputs.tag }} bash scripts/release/publish.sh --approve
+        env: { NODE_AUTH_TOKEN: "" }   # OIDC trusted publishing — no long-lived token

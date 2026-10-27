@@ -6,3 +6,5 @@ assets/
 .env
 .package-lock.json
 package-lock.json
+/vendor/
+/packages/*/bin/

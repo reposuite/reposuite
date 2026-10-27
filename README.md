@@ -1,51 +1,62 @@
-# reposuite
+# RepoSuite
 
-Developer toolkit for repo navigation, task automation, and browser control.
+*Your machines. Your projects. Your AI agents. One control plane.*
+
+RepoSuite is a cloud-managed AI development platform connecting your
+computers, projects, and AI agents into one workspace. The `reposuite`
+CLI installs and manages the local RepoSuite runtime — Gateway (local
+project authority over a private Unix socket), Relay (structured native
+agent sessions), and the Connector (outbound-only WSS link to RepoSuite
+Control) — as ordinary per-user systemd services. No root, no inbound
+ports.
 
 ## Install
 
 ```bash
-npm i -g reposuite
+npm install -g reposuite          # or reposuite@beta
 ```
 
-## Usage
+## Get started
 
 ```bash
-reposuite --help
+reposuite setup                   # install versioned runtime + user services
+reposuite doctor                  # readiness checks
+reposuite pair                    # pair this machine (invite from the Web Admin — protected input, never argv)
+reposuite status                  # service + pairing + activation state
 ```
 
-## Supported platforms
-
-- macOS: amd64, arm64
-- Linux: amd64, arm64
-- Windows: amd64, arm64
-
-## Notes
-
-RepoSuite downloads platform-specific binaries from GitHub Releases during install.
-To install a specific release, set `REPOSUITE_VERSION` (example: `v1.2.3`).
-
-For local testing with a packaged tarball that bundles assets:
-```bash
-npm i -g ./reposuite-<version>.tgz
-```
-
-Optional alias (print-only, no auto changes):
+Bind a project checkout for agent execution:
 
 ```bash
-alias rp="reposuite"
+reposuite-gateway project bind-workspace --project <key> --path /abs/checkout --agent-exec true
 ```
 
-## Troubleshooting
-
-If installation fails with a download error, check that GitHub Releases are reachable from your network and try reinstalling:
+## Update / rollback
 
 ```bash
-npm i -g reposuite
+npm update -g reposuite
+reposuite update apply            # activates the installed version — defers while agent sessions run
+reposuite rollback                # re-activate the previous runtime version
 ```
 
-You can validate the installer flow without downloads:
+## Services
 
-```bash
-npm run smoke:install
-```
+Three `systemd --user` units: `reposuite-rsg`, `reposuite-rsr`,
+`reposuite-connector`. Enable user lingering for boot persistence
+(`loginctl enable-linger $USER`). State lives under
+`~/.local/share/reposuite*` and `~/.reposuite` — preserved across
+upgrades and `uninstall` unless `purge-state` is run explicitly.
+
+## Platforms
+
+Linux x64 (Ubuntu 22.04+) — first supported platform.
+
+## Links
+
+- Web Admin / Control: https://app.reposuite.com
+- Issues: https://github.com/reposuite/reposuite/issues
+- Updating: UPDATING.md · Releasing: RELEASING.md
+
+## License
+
+CLI + packaging: MIT. Native platform binaries: proprietary (see LICENSE.md).

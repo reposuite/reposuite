@@ -1,24 +1,22 @@
 {
   "name": "reposuite",
-  "version": "0.2.0",
-  "description": "Developer toolkit for repo navigation, task automation, and browser control.",
-  "license": "MIT",
-  "bin": {
-    "reposuite": "bin/reposuite.js"
+  "version": "0.3.0-beta.1",
+  "description": "RepoSuite — a cloud-managed AI development platform connecting your computers, projects, and AI agents into one workspace.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "homepage": "https://reposuite.com",
+  "repository": { "type": "git", "url": "https://github.com/reposuite/reposuite.git" },
+  "bugs": "https://github.com/reposuite/reposuite/issues",
+  "keywords": ["reposuite", "ai-agents", "remote-agents", "developer-platform", "codex", "devin", "opencode"],
+  "bin": { "reposuite": "bin/reposuite.js" },
+  "engines": { "node": ">=18" },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/", "scripts/", "README.md", "LICENSE.md", "CHANGELOG.md"],
+  "optionalDependencies": {
+    "@reposuite/linux-x64": "0.3.0-beta.1"
   },
   "scripts": {
-    "postinstall": "node scripts/install.js",
-    "smoke:install": "node scripts/smoke-install.js"
-  },
-  "files": [
-    "bin/",
-    "assets/",
-    "scripts/",
-    "README.md",
-    "LICENSE",
-    "RELEASE.md"
-  ],
-  "engines": {
-    "node": ">=18"
+    "smoke:install": "node scripts/smoke-install.js",
+    "test": "node scripts/smoke-install.js"
   }
 }
