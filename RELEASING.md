@@ -5,7 +5,7 @@ Lifecycle: Development → RC → Tests → Independent Review → Approval → 
 ## Prepare
 ```bash
 git checkout main && git status           # must be clean
-export CONTROL_SHA=<sha> GATEWAY_SHA=<sha> RELAY_SHA=<sha>   # exact pins
+export GATEWAY_SHA=<sha> RELAY_SHA=<sha>   # exact pins (CONTROL_SHA optional: server-side only)
 bash scripts/release/prepare.sh <version>  # package.json == version, pins verified
 ```
 
@@ -18,8 +18,9 @@ bash scripts/release/verify.sh     # hashes, no secrets, metadata
 ```
 
 ## Publish (Owner-approved, after independent review)
-- **CI path (preferred):** Actions → "release" → inputs `APPROVE` + dist-tag
-  (`beta`/`latest`). Uses npm Trusted Publishing (OIDC) — no tokens in CI.
+- **CI path (preferred):** Actions → "release" → choose dist-tag (`beta`/`latest`);
+  the protected `release` environment requires Owner approval before any step
+  runs. Uses npm Trusted Publishing (OIDC) — no tokens in CI.
 - **Local (requires npm auth):** `NPM_TAG=beta bash scripts/release/publish.sh --approve`
 - `DRY_RUN=1` performs a non-publishing dry run.
 - Publishing refuses to reuse an already-published version.

@@ -4,6 +4,7 @@
 set -euo pipefail
 [ "${1:-}" = "--approve" ] || { echo "publish: pass --approve after review" >&2; exit 1; }
 TAG="${NPM_TAG:-beta}"
+case "$TAG" in beta|latest) ;; *) echo "publish: invalid dist-tag $TAG" >&2; exit 1;; esac
 V=$(node -p 'require("./package.json").version')
 npm view "reposuite@$V" version >/dev/null 2>&1 && { echo "publish: reposuite@$V already on npm" >&2; exit 1; }
 npm view "@reposuite/linux-x64@$V" version >/dev/null 2>&1 && { echo "publish: linux-x64@$V already on npm" >&2; exit 1; }

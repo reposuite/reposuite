@@ -2,71 +2,76 @@ name: release
 on:
   workflow_dispatch:
     inputs:
-      approve: { description: "type APPROVE to publish", required: true }
-      tag: { description: "npm dist-tag", default: beta }
+      tag:
+        description: "npm dist-tag"
+        type: choice
+        options: [beta, latest]
+        default: beta
 permissions:
   contents: write
   id-token: write            # npm Trusted Publishing (OIDC) — no stored tokens
 env:
-  CONTROL_SHA: ${{ vars.RELEASE_CONTROL_SHA }}
   GATEWAY_SHA: ${{ vars.RELEASE_GATEWAY_SHA }}
   RELAY_SHA: ${{ vars.RELEASE_RELAY_SHA }}
 jobs:
   publish:
     runs-on: ubuntu-22.04
-    if: github.event.inputs.approve == 'APPROVE'
+    # Protected environment with required reviewers: publication cannot start
+    # until the Owner approves the deployment. No APPROVE text input.
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 24, registry-url: https://registry.npmjs.org }
       - name: npm >= 11.5.1 (Trusted Publishing requirement)
         run: npm install -g npm@latest && npm --version
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.27.1' }
-      # private source fetch via a repo-scoped deploy key / fine-grained PAT
-      # stored as ACTIONS secrets (never logged, never persisted to artifacts)
       - name: pinned GitHub SSH host keys
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ vars.GITHUB_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -F github.com -f ~/.ssh/known_hosts >/dev/null || { echo "pinned host key missing" >&2; exit 1; }
-      # one deploy key per repository — never assume one key spans several
-      - name: fetch private sources
+      # Exactly two private source repos — no Control checkout (no local
+      # binary is built from it). One deploy key per repository.
+      - name: fetch pinned private sources
         env:
-          KEY_CONTROL: ${{ secrets.RELEASE_KEY_CONTROL }}
           KEY_GATEWAY: ${{ secrets.RELEASE_KEY_GATEWAY }}
           KEY_RELAY: ${{ secrets.RELEASE_KEY_RELAY }}
         run: |
-          clone() { # repo, dest, sha, key
+          clone() { # repo dest sha key
             printf '%s\n' "$4" > ~/.ssh/key_repo && chmod 600 ~/.ssh/key_repo
             GIT_SSH_COMMAND="ssh -i ~/.ssh/key_repo -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
               git clone "git@github.com:$1.git" "$2"
             git -C "$2" checkout "$3"
             rm -f ~/.ssh/key_repo
           }
-          clone rceman/reposuite-control ../reposuite-gw "$CONTROL_SHA" "$KEY_CONTROL"
           clone rceman/reposuite-gateway ../reposuite-gateway "$GATEWAY_SHA" "$KEY_GATEWAY"
           clone rceman/reposuite-relay ../reposuite-relay "$RELAY_SHA" "$KEY_RELAY"
       - run: bash scripts/release/prepare.sh "$(node -p 'require("./package.json").version')"
       - run: bash scripts/release/build.sh
       - run: bash scripts/release/package.sh
       - run: bash scripts/release/verify.sh
+      - run: node scripts/test-lifecycle.js
       - name: real install smoke in clean HOME
         run: |
           T=$(mktemp -d)
           export HOME=$T XDG_DATA_HOME=$T/.local/share XDG_CONFIG_HOME=$T/.config XDG_RUNTIME_DIR=$T/run
           mkdir -p $T/.local/bin $T/run $T/.local/lib && export PATH=$T/.local/bin:$PATH
           npm config set prefix $T/.local
-          npm install -g release-artifacts/reposuite-linux-x64-*.tgz --install-links
-          npm install -g release-artifacts/reposuite-[0-9]*.tgz --install-links
+          A=$PWD/release-artifacts
+          npm install -g "$A/reposuite-linux-x64-"*.tgz --install-links
+          npm install -g "$A/reposuite-0"*.tgz --install-links
           reposuite version && reposuite help | grep -q setup
           for b in reposuite-gateway reposuite-relay; do
             test -x "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/$b" || { echo "missing $b"; exit 1; }
           done
           test ! -e "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/rsc-connector" || { echo "connector must not ship"; exit 1; }
-          reposuite doctor || test $? -eq 1   # expected nonzero pre-service; a crash/other code fails
+          reposuite doctor || test $? -eq 1   # expected nonzero pre-service; crash/other code fails
       - name: publish (OIDC trusted publishing)
-        run: NPM_TAG=${{ github.event.inputs.tag }} bash scripts/release/publish.sh --approve
+        env:
+          NPM_TAG: ${{ inputs.tag }}          # passed via env, never interpolated into shell
+        run: |
+          case "$NPM_TAG" in beta|latest) ;; *) echo "invalid dist-tag: $NPM_TAG" >&2; exit 1;; esac
+          bash scripts/release/publish.sh --approve
       - uses: actions/upload-artifact@v4
         with: { name: release-artifacts, path: release-artifacts/, retention-days: 7 }

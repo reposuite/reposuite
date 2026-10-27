@@ -94,7 +94,8 @@ function relayProbe() {
         let d = ''; res.on('data', c => d += c);
         res.on('end', () => { try { const j = JSON.parse(d); resolve(j.daemon || null); } catch { resolve(null); } });
       });
-      req.on('error', () => resolve(null)); req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
       req.end();
     } catch { resolve(null); }
   });
@@ -119,6 +120,8 @@ function cloudPair(invite) {
 //  installedBinDir(): the currently activated runtime (old version).
 // update/setup must always install from pkgBinDir, never from the old runtime.
 function pkgBinDir() {
+  const override = process.env.REPOSUITE_BIN;
+  if (override && fs.existsSync(path.join(override, 'reposuite-gateway'))) return override;
   for (const cand of [
     // npm hoists optionalDependencies to the top-level node_modules as a
     // SIBLING of the entry package (<prefix>/lib/node_modules/@reposuite/...)
@@ -229,6 +232,59 @@ async function serviceOp(verb) {
   return cmds.status();
 }
 
+// ---- transactional runtime application ----
+// Preserve the previous active version AND its unit configuration; on any
+// failure restore both, reload systemd, verify recovery, and never report
+// success when recovery itself fails.
+function snapshotRuntime() {
+  const snap = { version: currentVersion(), units: {} };
+  for (const u of OWNED_UNITS) {
+    const p = path.join(UNITS, u);
+    snap.units[u] = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
+  }
+  return snap;
+}
+
+function restoreRuntime(snap) {
+  let okAll = true;
+  try {
+    if (snap.version) activate(snap.version);
+    else { try { fs.unlinkSync(CURRENT); } catch {} }
+  } catch { okAll = false; }
+  for (const [u, content] of Object.entries(snap.units)) {
+    const p = path.join(UNITS, u);
+    try { if (content == null) { try { fs.unlinkSync(p); } catch {} } else fs.writeFileSync(p, content); }
+    catch { okAll = false; }
+  }
+  if (systemdOK()) {
+    try { execSync('systemctl --user daemon-reload'); } catch { okAll = false; }
+    try { svc('restart', ...OWNED_UNITS.map(u => u.replace('.service', ''))); } catch { okAll = false; }
+  }
+  return okAll;
+}
+
+async function healthCheck() {
+  if (process.env.REPOSUITE_FAULT_INJECT === 'health') return false;
+  if (!fs.existsSync(SOCKET)) return false;
+  return !!(await relayProbe());
+}
+
+async function applyRuntime(version, binDir) {
+  const snap = snapshotRuntime();
+  const fail = (msg) => {
+    console.error('reposuite: ' + msg + ' — restoring previous runtime');
+    if (!restoreRuntime(snap)) die('RECOVERY FAILED — manual intervention required (previous: ' + (snap.version || 'none') + ')');
+    ok('previous runtime restored' + (snap.version ? ' (' + snap.version + ')' : ''));
+    process.exit(1);
+  };
+  try { activate(version); writeUnits(binDir); } catch (e) { fail('activation error: ' + e.message); }
+  if (!systemdOK()) { ok('systemd --user unavailable — staged only'); return; }
+  try { execSync('systemctl --user daemon-reload'); } catch { fail('daemon-reload failed'); }
+  if (!svc('enable', '--now', ...OWNED_UNITS.map(u => u.replace('.service', '')))) fail('service start failed');
+  if (process.env.REPOSUITE_FAULT_INJECT === 'start') fail('injected service failure');
+  if (!(await healthCheck())) fail('health verification failed');
+}
+
 const cmds = {
   async setup() {
     const b = pkgBinDir();
@@ -243,17 +299,9 @@ const cmds = {
     const vdir = path.join(VERSIONS, VERSION);
     mkdir(path.join(vdir, 'bin'));
     for (const f of OWNED_BINS) fs.copyFileSync(path.join(b, f), path.join(vdir, 'bin', f));
-    const prev = currentVersion();
-    try { activate(VERSION); } catch (e) { if (prev) try { activate(prev); } catch {} die('activation failed: ' + e.message); }
     mkdir(RSG_DIR); mkdir(RSR_HOME); mkdir(path.join(RSG_DIR, 'cloud')); mkdir(path.dirname(SOCKET));
     for (const d of [ROOT, RSG_DIR, RSR_HOME, path.join(RSG_DIR, 'cloud')]) try { fs.chmodSync(d, 0o700); } catch {}
-    writeUnits(path.join(vdir, 'bin'));
-    if (!systemdOK()) { ok('systemd --user unavailable — units staged; start manually'); return; }
-    execSync('systemctl --user daemon-reload');
-    if (!svc('enable', '--now', ...OWNED_UNITS.map(u => u.replace('.service', '')))) {
-      if (prev) try { activate(prev); } catch {}
-      die(`unit enable failed — units at ${UNITS}${prev ? ' (previous version restored)' : ''}`);
-    }
+    await applyRuntime(VERSION, path.join(vdir, 'bin'));
     ok(`setup complete (v${VERSION}) — run 'reposuite doctor', then 'reposuite pair'`);
   },
 
@@ -343,18 +391,13 @@ const cmds = {
     if (sessions !== 0) die(sessions > 0
       ? `${sessions} agent session(s) running — deferring activation`
       : 'Relay state unknown — deferring activation (fail closed)');
-    // install the NEW package's own binaries into a fresh version dir —
-    // never re-copy the old activated runtime into a new version.
     const b = pkgBinDir();
     if (!b) die('new package carries no platform binaries');
-    const v = VERSION;
-    const vdir = path.join(VERSIONS, v);
+    const vdir = path.join(VERSIONS, VERSION);
     mkdir(path.join(vdir, 'bin'));
     for (const f of OWNED_BINS) fs.copyFileSync(path.join(b, f), path.join(vdir, 'bin', f));
-    try { activate(v); } catch (e) { if (cur) try { activate(cur); } catch {} die('activation failed: ' + e.message); }
-    writeUnits(path.join(vdir, 'bin'));
-    if (systemdOK()) { execSync('systemctl --user daemon-reload'); cmds.restart(); }
-    ok(`activated ${v}${cur && cur !== v ? ` (previous ${cur} kept for rollback)` : ''}`);
+    await applyRuntime(VERSION, path.join(vdir, 'bin'));
+    ok(`activated ${VERSION}${cur && cur !== VERSION ? ` (previous ${cur} kept for rollback)` : ''}`);
   },
 
   rollback: async () => {
@@ -365,9 +408,7 @@ const cmds = {
     const s = await runningSessions();
     if (s !== 0) die(s > 0 ? `${s} agent session(s) running — stop them first`
                             : 'Relay state unknown — refusing rollback (fail closed)');
-    activate(target);
-    writeUnits(path.join(VERSIONS, target, 'bin'));
-    if (systemdOK()) { execSync('systemctl --user daemon-reload'); cmds.restart(); }
+    await applyRuntime(target, path.join(VERSIONS, target, 'bin'));
     ok(`rolled back ${cur} -> ${target}`);
   },
 
