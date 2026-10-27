@@ -4,7 +4,7 @@ set -euo pipefail
 V="${1:-}"
 [ -n "$V" ] || { echo "usage: prepare.sh <version>" >&2; exit 1; }
 node -e "const v=require('./package.json').version; if(v!=='$V') {console.error('package.json version '+v+' != $V');process.exit(1)}"
-[ -n "$(git status --porcelain)" ] && { echo "prepare: dirty tree" >&2; exit 1; }
+[ -n "$(git status --porcelain | grep -v '^??')" ] && { echo "prepare: dirty tree" >&2; exit 1; }
 : "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
 
 for pair in "gateway:../reposuite-gateway:$GATEWAY_SHA" "relay:../reposuite-relay:$RELAY_SHA"; do
