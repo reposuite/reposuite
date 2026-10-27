@@ -131,6 +131,29 @@ async function main() {
     fs.rmSync(t, { recursive: true, force: true });
   }
 
+  // ---------- case 3b: restore-time restart failure is NOT reported as recovery ----------
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    pkgBin(t);
+    // shim: every non-is-active verb fails → the apply fails AND the
+    // restore restart fails; CLI must report RECOVERY FAILED, not success.
+    fs.writeFileSync(path.join(env.PATH.split(':')[0], 'systemctl'), `#!/bin/sh
+case "$1" in --user) shift;; esac
+verb="$1"; shift
+case "$verb" in
+  daemon-reload|list-units|enable) exit 0;;
+  is-active) echo inactive; exit 0;;
+  *) exit 1;;
+esac
+`, { mode: 0o755 });
+    const r = run(t, env, ['update-apply']);
+    chk('restore restart failure exits nonzero', r.status !== 0);
+    chk('restore restart failure reported (no false success)', /RECOVERY FAILED|restoring previous runtime/.test(r.stderr + r.stdout)
+      && !/previous runtime restored/.test(r.stderr + r.stdout));
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
   // ---------- case 4: rollback failure restores the still-current version ----------
   {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));

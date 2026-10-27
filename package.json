@@ -1,22 +1,45 @@
 {
   "name": "reposuite",
   "version": "0.3.0-beta.1",
-  "description": "RepoSuite — a cloud-managed AI development platform connecting your computers, projects, and AI agents into one workspace.",
+  "description": "RepoSuite \u2014 a cloud-managed AI development platform connecting your computers, projects, and AI agents into one workspace.",
   "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://reposuite.com",
-  "repository": { "type": "git", "url": "https://github.com/reposuite/reposuite.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reposuite/reposuite.git"
+  },
   "bugs": "https://github.com/reposuite/reposuite/issues",
-  "keywords": ["reposuite", "ai-agents", "remote-agents", "developer-platform", "codex", "devin", "opencode"],
-  "bin": { "reposuite": "bin/reposuite.js" },
-  "engines": { "node": ">=18" },
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "files": ["bin/", "scripts/", "README.md", "LICENSE.md", "CHANGELOG.md"],
+  "keywords": [
+    "reposuite",
+    "ai-agents",
+    "remote-agents",
+    "developer-platform",
+    "codex",
+    "devin",
+    "opencode"
+  ],
+  "bin": {
+    "reposuite": "bin/reposuite.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE.md",
+    "CHANGELOG.md"
+  ],
   "optionalDependencies": {
     "@reposuite/linux-x64": "0.3.0-beta.1"
   },
   "scripts": {
-    "smoke:install": "node scripts/smoke-install.js",
-    "test": "node scripts/smoke-install.js"
+    "test": "node scripts/smoke-install.js && node scripts/test-lifecycle.js"
   }
 }

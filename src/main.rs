@@ -229,12 +229,24 @@ fn restore(p: &Paths, s: &Snapshot) -> bool {
     if systemd_ok() {
         let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
         if !svc("restart", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))) { all = false; }
+        // recovery is only proven when both restored units are actually up
+        for u in OWNED_UNITS { if !is_active(u.trim_end_matches(".service")) { all = false; } }
     }
     all
 }
 fn health(p: &Paths) -> bool {
     if env::var("REPOSUITE_FAULT_INJECT").as_deref() == Ok("health") { return false; }
     p.socket.exists() && relay_probe(p).is_some()
+}
+/// Readiness poll: freshly started daemons need time to bind the socket and
+/// mint relay credentials on first run — never fail a rollout on the first
+/// probe. Bounded (~30s).
+fn health_wait(p: &Paths) -> bool {
+    for _ in 0..60 {
+        if health(p) { return true; }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
 }
 fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     let snap = snapshot(p);
@@ -252,7 +264,7 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     if !cmd_ok("systemctl", &["--user", "daemon-reload"]) { fail("daemon-reload failed"); }
     if !svc("enable", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))) { fail("service start failed"); }
     if env::var("REPOSUITE_FAULT_INJECT").as_deref() == Ok("start") { fail("injected service failure"); }
-    if !health(p) { fail("health verification failed"); }
+    if !health_wait(p) { fail("health verification failed"); }
 }
 
 // ---- protected invite input: /dev/tty with echo disabled, always restored ----
@@ -317,8 +329,19 @@ fn cmd_setup(p: &Paths) {
     ok(&format!("setup complete (v{VERSION}) — run 'reposuite doctor', then 'reposuite pair'"));
 }
 
+fn paired(p: &Paths) -> bool {
+    // durable identity = non-empty gateway key AND credential; an
+    // unclaimed file (pre-claim epoch state) must never block pairing.
+    fs::read_to_string(p.gateway.join("cloud/gateway.json")).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|j| {
+            let nonempty = |k: &str| j.get(k).and_then(|v| v.as_str()).map(|v| !v.is_empty()).unwrap_or(false);
+            nonempty("gateway") && nonempty("credential")
+        }).unwrap_or(false)
+}
+
 fn cmd_pair(p: &Paths) {
-    if p.gateway.join("cloud/gateway.json").exists() { ok("already paired — revocation is a Control-side action"); return; }
+    if paired(p) { ok("already paired — revocation is a Control-side action"); return; }
     let invite = read_invite();
     match cloud_pair(p, &invite) {
         Ok(_) => ok("invite accepted — waiting for the cloud handshake"),

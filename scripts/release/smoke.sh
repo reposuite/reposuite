@@ -11,7 +11,7 @@ reposuite help | grep -q "setup"
 # smoke gate checks that doctor RUNS and reports, not that it passes.
 reposuite doctor; drc=$?
 [ $drc -ge 0 ] || { echo "smoke: doctor crashed" >&2; exit 1; }
-for b in reposuite-gateway reposuite-relay rsc-connector; do
+for b in reposuite reposuite-gateway reposuite-relay; do
   [ -x "$HOME/.local/lib/node_modules/@reposuite/linux-x64/bin/$b" ] || \
   find "$HOME" -name "$b" -type f | grep -q . || { echo "smoke: $b missing" >&2; exit 1; }
 done
