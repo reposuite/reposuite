@@ -4,8 +4,7 @@ set -euo pipefail
 : "${CONTROL_SHA:?}" "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
 OUT=packages/linux-x64/bin
 rm -rf "$OUT"; mkdir -p "$OUT"
-(cd ../reposuite-gw && CGO_ENABLED=0 GOTOOLCHAIN=auto go build -buildvcs=false -trimpath \
-  -o "$OLDPWD/$OUT/rsc-connector" ./cmd/rsc-connector)
+# EXACTLY TWO binaries — the Connector is embedded in Gateway.
 (cd ../reposuite-gateway && CGO_ENABLED=1 GOTOOLCHAIN=auto go build -buildvcs=false -trimpath \
   -o "$OLDPWD/$OUT/reposuite-gateway" ./cmd/reposuite-gateway)
 (cd ../reposuite-relay && CGO_ENABLED=0 GOTOOLCHAIN=auto go build -buildvcs=false -trimpath \
@@ -16,5 +15,6 @@ gateway=$GATEWAY_SHA
 relay=$RELAY_SHA
 built=$(date -u +%FT%TZ)
 EOF2
-chmod +x "$OUT"/{reposuite-gateway,reposuite-relay,rsc-connector}
+chmod +x "$OUT"/{reposuite-gateway,reposuite-relay}
+[ "$(ls "$OUT" | grep -c '^reposuite-')" = 2 ] || { echo "build: expected exactly 2 binaries" >&2; exit 1; }
 echo "build: 3 binaries -> $OUT"

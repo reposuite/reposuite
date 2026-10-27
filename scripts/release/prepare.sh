@@ -5,7 +5,8 @@ V="${1:-}"
 [ -n "$V" ] || { echo "usage: prepare.sh <version>" >&2; exit 1; }
 node -e "const v=require('./package.json').version; if(v!=='$V') {console.error('package.json version '+v+' != $V');process.exit(1)}"
 [ -n "$(git status --porcelain)" ] && { echo "prepare: dirty tree" >&2; exit 1; }
-: "${CONTROL_SHA:?}" "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
+: "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
+# CONTROL_SHA is optional (RSC server pin only — no local binary is built from it)
 for s in control:$CONTROL_SHA gateway:$GATEWAY_SHA relay:$RELAY_SHA; do
   d="../reposuite-${s%%:*}"; [ "$d" = "../reposuite-control" ] || d="../reposuite-${s%%:*}"
   [ "${s%%:*}" = "control" ] && d="../reposuite-gw"

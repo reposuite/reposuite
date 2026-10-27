@@ -8,4 +8,8 @@ for t in "$OUT"/*.tgz; do
   tar tzf "$t" | grep -E '\.go$|\.env|id_rsa|token' && { echo "verify: forbidden content in $t" >&2; exit 1; } || true
 done
 node -e "const p=require('./package.json'); if(!p.optionalDependencies) process.exit(1)"
-echo "verify: artifacts clean + manifest consistent"
+# exactly two native binaries in the platform package, no connector
+B=packages/linux-x64/bin
+[ "$(ls "$B" | grep -c '^reposuite-')" = 2 ] || { echo "verify: platform package must carry exactly 2 binaries" >&2; exit 1; }
+[ ! -e "$B/rsc-connector" ] || { echo "verify: rsc-connector must not ship" >&2; exit 1; }
+echo "verify: artifacts clean + two-binary contract + manifest consistent"

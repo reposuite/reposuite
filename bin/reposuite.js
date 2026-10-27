@@ -63,6 +63,43 @@ function cloudStatus() {
     req.on('error', () => resolve(null)); req.setTimeout(4000, () => { req.destroy(); resolve(null); }); req.end();
   });
 }
+// readHidden: muted-echo terminal input; readline restores terminal state
+// on close and on SIGINT (no stty shell-outs, no half-raw terminals).
+function readHidden(prompt) {
+  return new Promise((resolve, reject) => {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+    rl._writeToOutput = () => {};                 // never echo the secret
+    process.stderr.write(prompt);
+    const done = (err, val) => {
+      process.removeListener('SIGINT', onInt);
+      try { rl.close(); } catch {}
+      process.stderr.write('\n');
+      err ? reject(err) : resolve(val.trim());
+    };
+    const onInt = () => done(new Error('interrupted'));
+    process.once('SIGINT', onInt);
+    rl.question('', ans => done(null, ans));
+  });
+}
+
+// relayProbe: authenticated in-process HTTP to the loopback Relay — the
+// bearer never enters a child process argv.
+function relayProbe() {
+  return new Promise(resolve => {
+    try {
+      const tok = fs.readFileSync(path.join(RSR_HOME, 'config', 'api.token'), 'utf8').trim();
+      const port = JSON.parse(fs.readFileSync(path.join(RSR_HOME, 'config', 'relay.json'), 'utf8')).listenPort;
+      const req = http.request({ host: '127.0.0.1', port, path: '/v1/daemon', method: 'GET',
+        headers: { authorization: 'Bearer ' + tok }, timeout: 4000 }, res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => { try { const j = JSON.parse(d); resolve(j.daemon || null); } catch { resolve(null); } });
+      });
+      req.on('error', () => resolve(null)); req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    } catch { resolve(null); }
+  });
+}
+
 function cloudPair(invite) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ invite });
@@ -120,21 +157,12 @@ function cmpVer(a, b) {
   return 0;
 }
 
-function runningSessions() {
-  // real check: relay daemon sessionCount > 0 defers unsafe activation
-  try {
-    const tok = fs.readFileSync(path.join(RSR_HOME, 'config', 'api.token'), 'utf8').trim();
-    const port = JSON.parse(fs.readFileSync(path.join(RSR_HOME, 'config', 'relay.json'), 'utf8')).listenPort;
-    const out = execFileSync('wget', ['-qO-', `--header=Authorization: Bearer ${tok}`,
-      `http://127.0.0.1:${port}/v1/daemon`], { encoding: 'utf8', timeout: 5000 });
-    const d = JSON.parse(out);
-    const n = (d.daemon && (d.daemon.activeSessions ?? d.daemon.sessionCount)) || 0;
-    return n;
-  } catch {
-    // unknown: relay never initialized (no token) means no sessions possible;
-    // an EXISTING token that failed to answer means state unknown -> deny.
-    return fs.existsSync(path.join(RSR_HOME, 'config', 'api.token')) ? -1 : 0;
-  }
+// runningSessions must be awaited; -1 = unknown (deny activation).
+async function runningSessions() {
+  if (!fs.existsSync(path.join(RSR_HOME, 'config', 'api.token'))) return 0;
+  const d = await relayProbe();
+  if (!d) return -1;
+  return d.activeSessions ?? d.sessionCount ?? 0;
 }
 
 // migrateLegacy: one-time, idempotent, never overwrites existing data.
@@ -188,14 +216,27 @@ WantedBy=default.target
     { mode: 0o600 });
 }
 
+// serviceOp runs a systemctl verb on the two owned units and VALIDATES the
+// resulting state — a failed start/stop never reports success.
+async function serviceOp(verb) {
+  if (!systemdOK()) die('systemd --user unavailable');
+  const units = OWNED_UNITS.map(u => u.replace('.service', ''));
+  if (!svc(verb, ...units)) die(`${verb} failed (systemctl returned nonzero)`);
+  const want = verb === 'stop' ? false : true;
+  const bad = units.filter(u => isActive(u) !== want);
+  if (bad.length) die(`${verb} incomplete: ${bad.join(', ')} not ${want ? 'active' : 'stopped'}`);
+  ok(`${verb}: ${units.join(', ')} ${want ? 'active' : 'stopped'}`);
+  return cmds.status();
+}
+
 const cmds = {
-  setup() {
+  async setup() {
     const b = pkgBinDir();
     if (!b) die('native binaries not found — is the platform package installed?');
     mkdir(ROOT); migrateLegacy();
     const switching = currentVersion() && currentVersion() !== VERSION;
     if (switching && isActive('reposuite-relay')) {
-      const s = runningSessions();
+      const s = await runningSessions();
       if (s !== 0) die(s > 0 ? `${s} agent session(s) running — setup staged; run 'reposuite update apply' later`
                              : 'Relay state unknown — staging only (fail closed)');
     }
@@ -220,24 +261,28 @@ const cmds = {
     if (paired()) return ok('already paired — revocation is a Control-side action');
     let invite;
     if (!process.stdin.isTTY) invite = fs.readFileSync(0, 'utf8').trim();
-    else {
-      process.stderr.write('invite (inv_<id>.<secret>): ');
-      invite = execSync('stty -echo; head -n1; stty echo', { shell: '/bin/sh', encoding: 'utf8' }).trim();
-      process.stderr.write('\n');
-    }
+    else invite = await readHidden('invite (inv_<id>.<secret>): ');
     if (!/^inv_[\w-]+\.[\w-]+$/.test(invite)) die('malformed invite');
     // the invite travels ONLY over the owner-only Unix socket (local IPC)
     let st;
     try { st = await cloudPair(invite); } catch (e) { die('pairing failed: ' + e.message); }
-    if (!st || !st.paired) die('pairing did not produce durable gateway identity');
-    for (let i = 0; i < 20; i++) {
-      const s = await cloudStatus();
-      if (s && s.online) return ok(`paired + online (gateway ${s.gateway_key || '?'})`);
+    // invite is QUEUED asynchronously: accepted != paired != online
+    ok('invite accepted — waiting for the cloud handshake');
+    let pairedSeen = false, s = null;
+    for (let i = 0; i < 30; i++) {           // up to ~15s for durable identity
+      s = await cloudStatus();
+      if (s && s.paired) { pairedSeen = true; break; }
       await new Promise(r => setTimeout(r, 500));
     }
-    const s = await cloudStatus();
-    ok(`paired (durable identity stored)${s && s.last_error ? ' — cloud: ' + s.last_error : ''}`);
-    console.log('  note: online not yet observed — check: reposuite status');
+    if (!pairedSeen) die('pairing did not produce durable gateway identity (expired/refused invite?)');
+    ok(`paired (gateway ${s.gateway_key || '?'}) — waiting for authenticated cloud`);
+    for (let i = 0; i < 20; i++) {           // up to ~10s for online
+      s = await cloudStatus();
+      if (s && s.online) return ok('cloud ONLINE (authenticated WSS)');
+      await new Promise(r => setTimeout(r, 500));
+    }
+    ok('paired; online not yet observed' + (s && s.last_error ? ' — cloud: ' + s.last_error : ''));
+    console.log('  check: reposuite status');
   },
 
   async doctor() {
@@ -278,9 +323,9 @@ const cmds = {
     console.log(`activated version:      ${currentVersion() || 'none'}`);
   },
 
-  start() { svc('start', ...OWNED_UNITS.map(u => u.replace('.service', ''))); cmds.status(); },
-  stop() { svc('stop', 'reposuite-connector', 'reposuite-rsr', 'reposuite-rsg'); cmds.status(); },
-  restart() { svc('restart', ...OWNED_UNITS.map(u => u.replace('.service', ''))); cmds.status(); },
+  start() { return serviceOp('start'); },
+  stop() { return serviceOp('stop'); },
+  restart() { return serviceOp('restart'); },
 
   'update-check': () => {
     try {
@@ -292,9 +337,9 @@ const cmds = {
     } catch { die('npm registry unreachable'); }
   },
 
-  'update-apply': () => {
+  'update-apply': async () => {
     const cur = currentVersion();
-    const sessions = runningSessions();
+    const sessions = await runningSessions();
     if (sessions !== 0) die(sessions > 0
       ? `${sessions} agent session(s) running — deferring activation`
       : 'Relay state unknown — deferring activation (fail closed)');
@@ -312,12 +357,12 @@ const cmds = {
     ok(`activated ${v}${cur && cur !== v ? ` (previous ${cur} kept for rollback)` : ''}`);
   },
 
-  rollback: () => {
+  rollback: async () => {
     const cur = currentVersion();
     const versions = fs.readdirSync(VERSIONS).filter(v => v !== cur).sort(cmpVer).reverse();
     if (!versions.length) die('no previous version to roll back to');
     const target = versions[0];
-    const s = runningSessions();
+    const s = await runningSessions();
     if (s !== 0) die(s > 0 ? `${s} agent session(s) running — stop them first`
                             : 'Relay state unknown — refusing rollback (fail closed)');
     activate(target);
