@@ -455,7 +455,9 @@ fn cloud_pair_cancel(p: &Paths) {
 
 fn open_browser(url: &str) {
     // best-effort launcher; failure is non-fatal (headless boxes approve
-    // from any other device using the printed code)
+    // from any other device using the printed code). Only http(s) URLs —
+    // never hand a server-provided string to a shell-open primitive blindly.
+    if !(url.starts_with("https://") || url.starts_with("http://")) { return; }
     for (cmd, args) in [("xdg-open", vec![url]), ("wslview", vec![url]), ("open", vec![url])] {
         if have(cmd) {
             let _ = Command::new(cmd).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
@@ -501,8 +503,10 @@ fn cmd_pair(p: &Paths) {
     println!("reposuite: verification code {code}");
     open_browser(&url);
     println!("reposuite: approve in the browser to finish pairing (Ctrl-C to abort)...");
-    // bounded poll — the request expires server-side after 10 minutes
+    // bounded poll — the request expires server-side after 10 minutes;
+    // sleep BEFORE polling so RSC's per-request throttle never races us
     for _ in 0..200 {
+        std::thread::sleep(Duration::from_secs(3));
         if let Some(s) = cloud_pair_status(p) {
             match s.get("status").and_then(|v| v.as_str()).unwrap_or("unknown") {
                 "authorized" => { wait_paired_online(p); return; }
@@ -512,7 +516,6 @@ fn cmd_pair(p: &Paths) {
                 _ => {} // pending | throttled | unknown — keep polling
             }
         }
-        std::thread::sleep(Duration::from_secs(3));
     }
     cloud_pair_cancel(p);
     die("pairing timed out — request cancelled");
