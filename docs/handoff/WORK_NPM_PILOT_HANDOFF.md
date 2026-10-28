@@ -576,8 +576,8 @@ You are rsg_help on the native Ubuntu 22.04.5 WORK PC.
 3. Obey strict phase gates (Section 3):
    - Execute only the phase(s) explicitly authorized in this dispatch prompt.
    - Never run `reposuite pair` (Phase C) on `0.3.0-beta.1`; Phase C requires `0.3.0-beta.2` (`gateway=ab6808dbe0d97916ffff7c0f535d2a94725d9b16`) and a fresh Owner invite in `${XDG_RUNTIME_DIR}/reposuite-invite.tmp` (`0600`).
-4. After each phase, publish its report to rceman/reposuite-gateway branch
-   pilot/work-e2e-evidence at docs/pilots/work/phase-<X>.md per that branch's
+4. After each phase, publish its report to rceman/reposuite-work-evidence branch
+   main at docs/pilots/work/phase-<X>.md per that branch's
    docs/pilots/work/README.md (dedicated deploy key + env-scoped
    GIT_SSH_COMMAND; redaction gate must pass; local-first if key pending).
 5. Stop immediately on any failed check or stop condition without expanding scope, and return the Section 5 report.
