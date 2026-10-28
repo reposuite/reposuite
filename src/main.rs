@@ -497,10 +497,13 @@ fn cmd_pair(p: &Paths) {
         Err(e) => die(&format!("cannot start browser pairing: {e} (use 'reposuite pair --invite' for manual pairing)")),
     };
     let code = begin.get("user_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let url = begin.get("verify_url").and_then(|v| v.as_str()).unwrap_or("https://app.reposuite.com/pair").to_string();
-    if code.is_empty() { die("malformed pair-begin response"); }
+    // verification_url_complete carries the opaque browser-facing handle —
+    // the normal desktop flow needs NO manual code entry.
+    let url = begin.get("verification_url_complete").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "https://app.reposuite.com/pair".into());
     println!("reposuite: open {url}");
-    println!("reposuite: verification code {code}");
+    if !code.is_empty() { println!("reposuite: verification code {code} (optional visual check)"); }
     open_browser(&url);
     println!("reposuite: approve in the browser to finish pairing (Ctrl-C to abort)...");
     // bounded poll — the request expires server-side after 10 minutes;
