@@ -540,7 +540,7 @@ fn cmd_pair_manual(p: &Paths) {
         Ok(_) => ok("invite accepted — waiting for the cloud handshake"),
         Err(e) => die(&format!("pairing failed: {e}")),
     }
-    wait_paired_online(p);
+    std::process::exit(wait_paired_online(p));
 }
 
 fn cmd_doctor(p: &Paths) -> i32 {
