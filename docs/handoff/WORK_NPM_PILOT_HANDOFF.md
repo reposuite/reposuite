@@ -550,11 +550,10 @@ reposuite status
 
 ### 5.1 Durable Evidence Publishing (GitHub)
 
-Publish each phase report to the private repo `rceman/reposuite-gateway`,
-branch `pilot/work-e2e-evidence`, at `docs/pilots/work/phase-<X>.md` (append-only
-orphan branch; conventions, deploy-key access, redaction gate and template in
-`docs/pilots/work/README.md` + `TEMPLATE.md` on that branch, root commit
-`6c97b0d4ba04369fd0677868cf23d1ccceb2d43d`). Use a dedicated SSH deploy key
+Publish each phase report to the dedicated private repo `rceman/reposuite-work-evidence`,
+branch `main`, at `docs/pilots/work/phase-<X>.md` (append-only conventions, deploy-key
+access, redaction gate and template in `docs/pilots/work/README.md` + `TEMPLATE.md`,
+root commit `673f5384f5ab8ae72f7189b0022e0fbfe9f19794`). Use a dedicated SSH deploy key
 (`~/.ssh/rsevidence`) and env-scoped `GIT_SSH_COMMAND`; never modify
 `~/.gitconfig`, `~/.ssh/config`, or other WORK repo checkouts. If the deploy
 key is not yet provisioned, write reports locally and push later — evidence
