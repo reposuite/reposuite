@@ -548,6 +548,18 @@ reposuite status
 - Final Verdict: WORK_PREFLIGHT_PASSED | WORK_LOCAL_INSTALL_PASSED | WORK_E2E_PASSED | BLOCKED (<reason>)
 ```
 
+### 5.1 Durable Evidence Publishing (GitHub)
+
+Publish each phase report to the private repo `rceman/reposuite-gateway`,
+branch `pilot/work-e2e-evidence`, at `docs/pilots/work/phase-<X>.md` (append-only
+orphan branch; conventions, deploy-key access, redaction gate and template in
+`docs/pilots/work/README.md` + `TEMPLATE.md` on that branch, root commit
+`6c97b0d4ba04369fd0677868cf23d1ccceb2d43d`). Use a dedicated SSH deploy key
+(`~/.ssh/rsevidence`) and env-scoped `GIT_SSH_COMMAND`; never modify
+`~/.gitconfig`, `~/.ssh/config`, or other WORK repo checkouts. If the deploy
+key is not yet provisioned, write reports locally and push later — evidence
+publishing never blocks an authorized phase.
+
 ---
 
 ## 6. Proposed Short Bootstrap Prompt for `rsg_help` (For Planner Review Only)
@@ -564,5 +576,9 @@ You are rsg_help on the native Ubuntu 22.04.5 WORK PC.
 3. Obey strict phase gates (Section 3):
    - Execute only the phase(s) explicitly authorized in this dispatch prompt.
    - Never run `reposuite pair` (Phase C) on `0.3.0-beta.1`; Phase C requires `0.3.0-beta.2` (`gateway=ab6808dbe0d97916ffff7c0f535d2a94725d9b16`) and a fresh Owner invite in `${XDG_RUNTIME_DIR}/reposuite-invite.tmp` (`0600`).
-4. Stop immediately on any failed check or stop condition without expanding scope, and return the Section 5 report.
+4. After each phase, publish its report to rceman/reposuite-gateway branch
+   pilot/work-e2e-evidence at docs/pilots/work/phase-<X>.md per that branch's
+   docs/pilots/work/README.md (dedicated deploy key + env-scoped
+   GIT_SSH_COMMAND; redaction gate must pass; local-first if key pending).
+5. Stop immediately on any failed check or stop condition without expanding scope, and return the Section 5 report.
 ```
