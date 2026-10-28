@@ -436,13 +436,35 @@ fn paired(p: &Paths) -> bool {
         }).unwrap_or(false)
 }
 
-fn cmd_pair(p: &Paths) {
-    if paired(p) { ok("already paired — revocation is a Control-side action"); return; }
-    let invite = read_invite();
-    match cloud_pair(p, &invite) {
-        Ok(_) => ok("invite accepted — waiting for the cloud handshake"),
-        Err(e) => die(&format!("pairing failed: {e}")),
+fn cloud_pair_begin(p: &Paths) -> Result<serde_json::Value, String> {
+    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair-begin", Some("{}"))
+        .ok_or("gateway socket unavailable")?;
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap_or(serde_json::Value::Null);
+    if st == 200 { Ok(v) } else {
+        Err(v.pointer("/error/message").and_then(|m| m.as_str()).unwrap_or("pair begin failed").to_string())
     }
+}
+fn cloud_pair_status(p: &Paths) -> Option<serde_json::Value> {
+    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair-status", Some("{}"))?;
+    if st != 200 { return None; }
+    serde_json::from_str(&b).ok()
+}
+fn cloud_pair_cancel(p: &Paths) {
+    let _ = http_unix(&p.socket, "POST", "/v1/cloud/pair-cancel", Some("{}"));
+}
+
+fn open_browser(url: &str) {
+    // best-effort launcher; failure is non-fatal (headless boxes approve
+    // from any other device using the printed code)
+    for (cmd, args) in [("xdg-open", vec![url]), ("wslview", vec![url]), ("open", vec![url])] {
+        if have(cmd) {
+            let _ = Command::new(cmd).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            return;
+        }
+    }
+}
+
+fn wait_paired_online(p: &Paths) {
     let mut paired_seen = false;
     let mut last: Option<serde_json::Value> = None;
     for _ in 0..30 {
@@ -452,7 +474,7 @@ fn cmd_pair(p: &Paths) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    if !paired_seen { die("pairing did not produce durable gateway identity (expired/refused invite?)"); }
+    if !paired_seen { die("pairing did not produce durable gateway identity (expired/refused?)"); }
     let key = last.as_ref().and_then(|s| s.get("gateway_key")).and_then(|v| v.as_str()).unwrap_or("?").to_string();
     ok(&format!("paired (gateway {key}) — waiting for authenticated cloud"));
     for _ in 0..20 {
@@ -462,6 +484,48 @@ fn cmd_pair(p: &Paths) {
         std::thread::sleep(Duration::from_millis(500));
     }
     ok("paired; online not yet observed — check: reposuite status");
+}
+
+fn cmd_pair(p: &Paths) {
+    if paired(p) { ok("already paired — revocation is a Control-side action"); return; }
+    // Browser device-authorization flow (ADR-PAIR-001): the gateway daemon
+    // owns the device_secret — it is never in argv/env/history here.
+    let begin = match cloud_pair_begin(p) {
+        Ok(v) => v,
+        Err(e) => die(&format!("cannot start browser pairing: {e} (use 'reposuite pair --invite' for manual pairing)")),
+    };
+    let code = begin.get("user_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let url = begin.get("verify_url").and_then(|v| v.as_str()).unwrap_or("https://app.reposuite.com/pair").to_string();
+    if code.is_empty() { die("malformed pair-begin response"); }
+    println!("reposuite: open {url}");
+    println!("reposuite: verification code {code}");
+    open_browser(&url);
+    println!("reposuite: approve in the browser to finish pairing (Ctrl-C to abort)...");
+    // bounded poll — the request expires server-side after 10 minutes
+    for _ in 0..200 {
+        if let Some(s) = cloud_pair_status(p) {
+            match s.get("status").and_then(|v| v.as_str()).unwrap_or("unknown") {
+                "authorized" => { wait_paired_online(p); return; }
+                "denied" => die("pairing denied"),
+                "expired" => die("pairing request expired — run 'reposuite pair' again"),
+                "claimed" => die("pairing credentials already claimed"),
+                _ => {} // pending | throttled | unknown — keep polling
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    cloud_pair_cancel(p);
+    die("pairing timed out — request cancelled");
+}
+
+fn cmd_pair_manual(p: &Paths) {
+    if paired(p) { ok("already paired — revocation is a Control-side action"); return; }
+    let invite = read_invite();
+    match cloud_pair(p, &invite) {
+        Ok(_) => ok("invite accepted — waiting for the cloud handshake"),
+        Err(e) => die(&format!("pairing failed: {e}")),
+    }
+    wait_paired_online(p);
 }
 
 fn cmd_doctor(p: &Paths) -> i32 {
@@ -633,6 +697,7 @@ fn main() {
     match sub.as_slice() {
         ["setup"] => cmd_setup(&p),
         ["pair"] => cmd_pair(&p),
+        ["pair", "--invite"] => cmd_pair_manual(&p),
         ["doctor"] => std::process::exit(cmd_doctor(&p)),
         ["status"] => cmd_status(&p),
         ["start"] => service_op("start"),
@@ -645,6 +710,6 @@ fn main() {
         ["purge-state", rest @ ..] => cmd_purge(&p, rest.iter().any(|a| *a == "--yes")),
         ["migrate"] => { mkdir700(&p.root); migrate_legacy(&p); }
         ["version"] => println!("{VERSION}"),
-        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair             protected invite pairing (hidden prompt or stdin)\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)"),
+        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair             browser pairing (approve in web admin); --invite = manual invite\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)"),
     }
 }
