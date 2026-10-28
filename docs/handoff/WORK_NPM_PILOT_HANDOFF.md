@@ -46,7 +46,7 @@ Execute a staged, non-destructive end-to-end (E2E) pilot of RepoSuite on the nat
 3. **Prepared `0.3.0-beta.2` Candidate (Not Yet Published)**:
    - `rceman/reposuite-gateway@ab6808dbe0d97916ffff7c0f535d2a94725d9b16` (branch `release/beta.2-hello-wire-fix`) aligns `GatewayHello.GatewayKey` and `GatewayHelloResult.GatewayKey` in `internal/cloud/rpc.go` to `json:"gateway,omitempty"` and adds `TestCanonicalWireHandshakeClaimPersistResumeReconnect` in `internal/cloud/race_test.go`.
    - `rceman/reposuite-relay@0aa45414668ca03a7abd8f1a1a0d80ae35ce8137` is unchanged.
-   - `reposuite/reposuite` keeps `src/` and `bin/` byte-identical to `033fcfd72ebc14a57592903de7e34458e9ec4d83` and bumps package/CLI version to `0.3.0-beta.2`.
+   - `reposuite/reposuite` keeps `src/`+`bin/` frozen vs `033fcfd72ebc14a57592903de7e34458e9ec4d83` except the explicitly approved `src/main.rs` lifecycle corrections (blob `ddcf1b53e0ce4f3010c6509864432172c4d66421`: `http_tcp` Host `127.0.0.1:<port>` — the R0-confirmed Phase B root cause — plus first-install rollback and managed-service-safe orphan reap). Version bumped to `0.3.0-beta.2`.
 
 ---
 
