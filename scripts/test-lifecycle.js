@@ -81,8 +81,13 @@ function run(t, env, args) {
 // the event loop, so an in-process server could never answer the CLI.
 function startHealthServer() {
   const { spawn } = require('child_process');
+  // STRICT fixture, mirroring Relay's Host validation (ADR-006): Host must be
+  // exactly 127.0.0.1:<port> — bare "127.0.0.1" gets HTTP 421, so a portless
+  // Host bug in the CLI can never pass this fixture again.
   const src = `const http=require('http');const s=http.createServer((q,r)=>{
+    const port=s.address().port;
     if(q.headers.authorization!=='Bearer testtoken'){r.writeHead(401);return r.end('{}');}
+    if(q.headers.host!=='127.0.0.1:'+port){r.writeHead(421);return r.end('{}');}
     r.writeHead(200,{'content-type':'application/json'});
     r.end(JSON.stringify({daemon:{apiVersion:2,activeSessions:0,sessionCount:0}}));});
     s.listen(0,'127.0.0.1',()=>console.log(s.address().port));`;

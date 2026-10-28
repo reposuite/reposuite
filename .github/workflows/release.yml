@@ -133,7 +133,7 @@ jobs:
           # src/main.rs carries the beta.2 first-install rollback/orphan-reap
           # correction — pinned by exact blob SHA, every other src/bin file frozen.
           git cat-file -e "$DIST_BASE^{commit}" || git fetch -q origin "$DIST_BASE"
-          WANT_MAIN_RS_BLOB="cbe2e24847a7bc13b55975bea905dd4506223b44"
+          WANT_MAIN_RS_BLOB="ddcf1b53e0ce4f3010c6509864432172c4d66421"
           [ "$(git hash-object src/main.rs)" = "$WANT_MAIN_RS_BLOB" ] || { echo "src/main.rs != approved beta.2 fix blob" >&2; exit 1; }
           git diff --exit-code "$DIST_BASE" HEAD -- bin src ':(exclude)src/main.rs'
           # Relay: only *_test.go may differ vs the approved base.

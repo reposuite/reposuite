@@ -581,3 +581,42 @@ You are rsg_help on the native Ubuntu 22.04.5 WORK PC.
    GIT_SSH_COMMAND; redaction gate must pass; local-first if key pending).
 5. Stop immediately on any failed check or stop condition without expanding scope, and return the Section 5 report.
 ```
+
+---
+
+## 7. WORK Partial-Install Recovery (Planner-Gated; supersedes Phase B for this WORK state)
+
+WORK is in a partial-install state: `0.3.0-beta.1` copied under `versions/`, two orphan daemons running (`reposuite-gateway`/`reposuite-relay` executables under `versions/0.3.0-beta.1/bin` with unloaded units), unit files and `current` activation removed. R0 evidence confirmed the root cause: the beta.1 CLI sent `Host: 127.0.0.1` without the Relay port → strict Relay Host validation → HTTP 421 → health timeout → broken rollback. **Only the `0.3.0-beta.2` CLI contains the fix.**
+
+- **Phase R0 (done)**: read-only evidence capture — completed, reports in `rceman/reposuite-work-evidence` (`phase-A.md`, `phase-B.md`, `recovery-R0.md`).
+- **Phase R1 — install fixed CLI only** (authorization: beta.2 published + separate Owner grant):
+  ```bash
+  set -euo pipefail
+  npm view reposuite@beta version --registry=https://registry.npmjs.org   # expect 0.3.0-beta.2
+  # invocation-scoped prefix only — never npm config set prefix
+  DEFAULT_NPM_PREFIX="$(npm config get prefix)"
+  if [ -w "$DEFAULT_NPM_PREFIX" ]; then NPM_PREFIX="$DEFAULT_NPM_PREFIX"; NPM_PREFIX_ARGS=();
+  else NPM_PREFIX="$HOME/.local"; mkdir -p "$NPM_PREFIX"; NPM_PREFIX_ARGS=(--prefix "$NPM_PREFIX"); fi
+  export PATH="$NPM_PREFIX/bin:$PATH"
+  npm install -g "${NPM_PREFIX_ARGS[@]}" --registry=https://registry.npmjs.org reposuite@0.3.0-beta.2
+  test "$(reposuite version)" = "0.3.0-beta.2"
+  # verify build pins from the actually-installed platform package
+  NPM_GLOBAL_ROOT="$(npm root -g "${NPM_PREFIX_ARGS[@]}")"
+  NPM_GLOBAL_ROOT="$NPM_GLOBAL_ROOT" node -e 'const fs=require("fs"),p=require("path"),r=process.env.NPM_GLOBAL_ROOT;for(const c of [p.join(r,"@reposuite/linux-x64/bin/PINS.txt"),p.join(r,"reposuite/node_modules/@reposuite/linux-x64/bin/PINS.txt")])if(fs.existsSync(c)){console.log(fs.readFileSync(c,"utf8"));process.exit(0)}process.exit(1)'
+  ```
+  Do NOT run `reposuite setup`/`update apply` in R1.
+- **Phase R2 — recover existing partial install** (requires R1 PASS + separate Owner grant):
+  ```bash
+  set -euo pipefail
+  DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/reposuite"
+  # fixed CLI reaps the two orphans (exe under versions/, units not active),
+  # rewrites unit files, activates current, health-waits with leg diagnostics
+  reposuite setup
+  systemctl --user is-active reposuite-gateway.service reposuite-relay.service
+  reposuite status        # activated version: 0.3.0-beta.2
+  reposuite doctor        # all ok except 'gateway paired (durable identity)'
+  stat -c '%a %n' "$DATA_ROOT" "$DATA_ROOT/gateway.env"
+  ```
+  Success criteria: both units `active`, `current` → `versions/0.3.0-beta.2`, `status` shows activation, `doctor` fails only on `gateway paired`. State preserved: `gateway/store`, `relay/` data and config are NOT deleted — the recovery reuses them.
+  On ANY failure: run no further commands; capture `reposuite status`, `systemctl --user status reposuite-*.service --no-pager`, bounded `journalctl --user -u 'reposuite-*' -n 200`, publish as `docs/pilots/work/recovery-R2.md`, and STOP.
+  Pairing (Phase C) and `agent_exec` stay disabled until separate Owner authorization after R2 PASS.

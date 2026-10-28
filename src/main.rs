@@ -155,7 +155,10 @@ fn http_tcp(port: u16, bearer: &str, path: &str) -> Option<(u16, String)> {
     use std::net::TcpStream;
     let mut s = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(4)));
-    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n");
+    // Relay validates Host strictly (ADR-006): it must be 127.0.0.1:<port>,
+    // not bare 127.0.0.1 — a portless Host gets HTTP 421 and health polling
+    // would expire while the daemon is actually fine.
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).ok()?;
     read_http(&mut s)
 }
@@ -233,7 +236,13 @@ fn owned_pids(p: &Paths) -> Vec<u32> {
             let Ok(exe) = fs::read_link(e.path().join("exe")) else { continue };
             if !roots.iter().any(|r| exe.starts_with(r)) { continue; }
             let base = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if OWNED_BINS.contains(&base.as_str()) { out.push(pid); }
+            if !OWNED_BINS.contains(&base.as_str()) { continue; }
+            // Never terminate a systemd-managed service: only processes whose
+            // owning unit is NOT active are orphans. `is_active` on a
+            // deleted/unloaded unit is false, which is exactly the partial-
+            // install case we must reap — a live managed unit stays untouched.
+            if systemd_ok() && is_active(&base) { continue; }
+            out.push(pid);
         }
     }
     out
@@ -327,7 +336,11 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     // defeat the new units' bind — reap them before restart. Scoped strictly
     // to executables inside this installation's versioned tree.
     let orphans = owned_pids(p);
-    if !orphans.is_empty() { kill_pids(&orphans); }
+    if !orphans.is_empty() {
+        kill_pids(&orphans);
+        // Bounded failure path: any survivor would still hold the socket/port.
+        if !owned_pids(p).is_empty() { fail("could not terminate orphan processes"); }
+    }
     // enable only installs symlinks — it does NOT start units. Restart them
     // (start if not running) so the NEW binaries actually execute, then
     // verify both are active before health polling.
