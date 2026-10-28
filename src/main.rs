@@ -466,7 +466,10 @@ fn open_browser(url: &str) {
     }
 }
 
-fn wait_paired_online(p: &Paths) {
+// Returns the process exit code: 0 = paired AND cloud-online confirmed;
+// 2 = durable identity claimed but connectivity not yet observed (pairing
+// itself succeeded — not a failure, but NOT full success either).
+fn wait_paired_online(p: &Paths) -> i32 {
     let mut paired_seen = false;
     let mut last: Option<serde_json::Value> = None;
     for _ in 0..30 {
@@ -481,11 +484,16 @@ fn wait_paired_online(p: &Paths) {
     ok(&format!("paired (gateway {key}) — waiting for authenticated cloud"));
     for _ in 0..20 {
         if let Some(s) = cloud_status(p) {
-            if s.get("online").and_then(|v| v.as_bool()) == Some(true) { ok("cloud ONLINE (authenticated WSS)"); return; }
+            if s.get("online").and_then(|v| v.as_bool()) == Some(true) {
+                ok("cloud ONLINE (authenticated WSS)");
+                return 0;
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    ok("paired; online not yet observed — check: reposuite status");
+    eprintln!("reposuite: paired but cloud connectivity not yet confirmed —");
+    eprintln!("reposuite: durable gateway identity is saved; check: reposuite status / reposuite doctor");
+    2
 }
 
 fn cmd_pair(p: &Paths) {
@@ -512,11 +520,12 @@ fn cmd_pair(p: &Paths) {
         std::thread::sleep(Duration::from_secs(3));
         if let Some(s) = cloud_pair_status(p) {
             match s.get("status").and_then(|v| v.as_str()).unwrap_or("unknown") {
-                "authorized" => { wait_paired_online(p); return; }
+                "authorized" => { std::process::exit(wait_paired_online(p)); }
                 "denied" => die("pairing denied"),
                 "expired" => die("pairing request expired — run 'reposuite pair' again"),
-                "claimed" => die("pairing credentials already claimed"),
-                _ => {} // pending | throttled | unknown — keep polling
+                _ => {} // pending | throttled | unknown | claimed (daemon
+                        // still delivering the claimed invite locally — keep
+                        // polling; it reports authorized once delivered)
             }
         }
     }
