@@ -11,7 +11,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync, spawnSync, spawn } = require('child_process');
 
 // canonical CLI = the Rust binary (REPOSUITE_CLI override for CI layouts)
 const CLI = process.env.REPOSUITE_CLI || path.join(__dirname, '..', 'target', 'release', 'reposuite');
@@ -172,6 +172,68 @@ esac
     const r = run(t, { ...env, REPOSUITE_FAULT_INJECT: 'start' }, ['rollback']);
     chk('rollback injected failure exits nonzero', r.status !== 0);
     chk('rollback failure keeps current version', path.basename(fs.readlinkSync(paths.current)) === '0.0.2');
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // ---------- case 5: FIRST-INSTALL health failure removes cleanly (no restart-of-nothing) ----------
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    // simulate first install: no previous version, no units, no current
+    fs.rmSync(path.join(paths.data, 'reposuite'), { recursive: true, force: true });
+    for (const u of ['reposuite-gateway.service', 'reposuite-relay.service'])
+      fs.rmSync(path.join(paths.units, u), { force: true });
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    pkgBin(t);
+    const r = run(t, { ...env, REPOSUITE_FAULT_INJECT: 'health' }, ['setup']);
+    chk('first-install health failure exits nonzero', r.status !== 0);
+    chk('first-install failure does NOT report RECOVERY FAILED', !/RECOVERY FAILED/.test(r.stderr + r.stdout));
+    chk('first-install failure reports removal', /removed failed install|previous/.test(r.stderr + r.stdout));
+    chk('no activation left behind', !fs.existsSync(paths.current));
+    chk('unit files removed', !fs.existsSync(path.join(paths.units, 'reposuite-gateway.service')));
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // ---------- case 6: delayed readiness still succeeds within the bounded poll ----------
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    pkgBin(t);
+    fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), 'testtoken', { mode: 0o600 });
+    fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const r = run(t, env, ['setup']);
+    chk('delayed-readiness setup exits zero', r.status === 0);
+    chk('activation recorded', fs.existsSync(paths.current));
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // ---------- case 7: orphan daemons from a partial install are reaped before restart ----------
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    pkgBin(t);
+    // partial-install state: units+current gone, orphan daemon process running
+    for (const u of ['reposuite-gateway.service', 'reposuite-relay.service'])
+      fs.rmSync(path.join(paths.units, u), { force: true });
+    fs.rmSync(paths.current, { force: true });
+    const sleeper = path.join(paths.data, 'reposuite', 'versions', '0.0.1', 'bin', 'reposuite-gateway');
+    fs.copyFileSync('/bin/sleep', sleeper); fs.chmodSync(sleeper, 0o755);
+    const orphan = spawn(sleeper, ['600'], { detached: true }).pid;
+    fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), 'testtoken', { mode: 0o600 });
+    fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const r = run(t, env, ['setup']);
+    // dead child stays a zombie of this test process, so kill(pid,0) lies —
+    // /proc/<pid>/exe is the reliable liveness check.
+    chk('partial-install setup exits zero', r.status === 0);
+    chk('orphan daemon reaped', !fs.existsSync(`/proc/${orphan}/exe`));
+    chk('activation recorded after orphan reap', fs.existsSync(paths.current));
+    try { process.kill(orphan, 'SIGKILL'); } catch {}
     fs.rmSync(t, { recursive: true, force: true });
   }
 

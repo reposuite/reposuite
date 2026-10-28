@@ -129,9 +129,13 @@ jobs:
         run: |
           set -euo pipefail
           # Distribution: application sources and the frozen Node launcher
-          # may not change vs the approved base; manifest files may only bump version.
+          # may not change vs the approved base. EXPLICIT approved exception:
+          # src/main.rs carries the beta.2 first-install rollback/orphan-reap
+          # correction — pinned by exact blob SHA, every other src/bin file frozen.
           git cat-file -e "$DIST_BASE^{commit}" || git fetch -q origin "$DIST_BASE"
-          git diff --exit-code "$DIST_BASE" HEAD -- src bin
+          WANT_MAIN_RS_BLOB="cbe2e24847a7bc13b55975bea905dd4506223b44"
+          [ "$(git hash-object src/main.rs)" = "$WANT_MAIN_RS_BLOB" ] || { echo "src/main.rs != approved beta.2 fix blob" >&2; exit 1; }
+          git diff --exit-code "$DIST_BASE" HEAD -- bin src ':(exclude)src/main.rs'
           # Relay: only *_test.go may differ vs the approved base.
           git -C ../reposuite-relay diff --exit-code "$RELAY_BASE" HEAD -- . ':(exclude)**/*_test.go'
           # Gateway: exact pin, same check shape (vacuous by construction).

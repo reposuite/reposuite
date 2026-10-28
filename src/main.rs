@@ -216,22 +216,76 @@ fn snapshot(p: &Paths) -> Snapshot {
     for u in OWNED_UNITS { units.insert(u.to_string(), fs::read(p.units.join(u)).ok()); }
     Snapshot { version: current_version(p), units }
 }
+// owned_pids returns PIDs of live processes whose executable lives inside
+// this installation's versioned tree. Strictly scoped: the /proc exe target
+// must resolve under versions/ or current/bin AND match an owned binary
+// name — nothing else on the host is ever matched or signalled.
+fn owned_pids(p: &Paths) -> Vec<u32> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(c) = fs::canonicalize(&p.versions) { roots.push(c); }
+    if let Ok(c) = fs::canonicalize(p.current.join("bin")) { roots.push(c); }
+    let mut out = Vec::new();
+    if roots.is_empty() { return out; }
+    if let Ok(rd) = fs::read_dir("/proc") {
+        for e in rd.flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+            if pid == std::process::id() { continue; }
+            let Ok(exe) = fs::read_link(e.path().join("exe")) else { continue };
+            if !roots.iter().any(|r| exe.starts_with(r)) { continue; }
+            let base = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if OWNED_BINS.contains(&base.as_str()) { out.push(pid); }
+        }
+    }
+    out
+}
+fn kill_pids(pids: &[u32]) {
+    for pid in pids { unsafe { libc::kill(*pid as i32, libc::SIGTERM); } }
+    for _ in 0..40 { // ~20s graceful shutdown window
+        if pids.iter().all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0) { return; }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    for pid in pids { unsafe { libc::kill(*pid as i32, libc::SIGKILL); } }
+}
+
 fn restore(p: &Paths, s: &Snapshot) -> bool {
     let mut all = true;
     match &s.version {
-        Some(v) => { if activate(p, v).is_err() { all = false; } }
-        None => { let _ = fs::remove_file(&p.current); }
-    }
-    for (u, content) in &s.units {
-        let path = p.units.join(u);
-        let r = match content { Some(c) => fs::write(&path, c), None => { let _ = fs::remove_file(&path); Ok(()) } };
-        if r.is_err() { all = false; }
-    }
-    if systemd_ok() {
-        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
-        if !svc("restart", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))) { all = false; }
-        // recovery is only proven when both restored units are actually up
-        for u in OWNED_UNITS { if !is_active(u.trim_end_matches(".service")) { all = false; } }
+        Some(v) => {
+            for (u, content) in &s.units {
+                let path = p.units.join(u);
+                let r = match content { Some(c) => fs::write(&path, c), None => { let _ = fs::remove_file(&path); Ok(()) } };
+                if r.is_err() { all = false; }
+            }
+            if activate(p, v).is_err() { all = false; }
+            if systemd_ok() {
+                let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+                if !svc("restart", &OWNED_UNITS.map(|u| u.trim_end_matches(".service"))) { all = false; }
+                // recovery is only proven when both restored units are actually up
+                for u in OWNED_UNITS { if !is_active(u.trim_end_matches(".service")) { all = false; } }
+            }
+        }
+        None => {
+            // First-install rollback: there is NO previous runtime, so the
+            // correct end state is "not installed" — not restarting removed
+            // units. Stop/disable the just-installed units while their unit
+            // files still exist (a post-removal daemon-reload would orphan
+            // them), then remove files + activation and reap any orphans.
+            if systemd_ok() {
+                let names = OWNED_UNITS.map(|u| u.trim_end_matches(".service"));
+                let _ = svc("stop", &names);
+                let _ = svc("disable", &names);
+            }
+            for (u, content) in &s.units {
+                let path = p.units.join(u);
+                let r = match content { Some(c) => fs::write(&path, c), None => { let _ = fs::remove_file(&path); Ok(()) } };
+                if r.is_err() { all = false; }
+            }
+            let _ = fs::remove_file(&p.current);
+            if systemd_ok() { let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status(); }
+            let pids = owned_pids(p);
+            if !pids.is_empty() { kill_pids(&pids); }
+            if !owned_pids(p).is_empty() { all = false; }
+        }
     }
     all
 }
@@ -241,12 +295,18 @@ fn health(p: &Paths) -> bool {
 }
 /// Readiness poll: freshly started daemons need time to bind the socket and
 /// mint relay credentials on first run — never fail a rollout on the first
-/// probe. Bounded (~30s).
+/// probe. Bounded (~30s) and reports the leg that timed out for diagnosis.
 fn health_wait(p: &Paths) -> bool {
+    let mut last = "unknown";
     for _ in 0..60 {
         if health(p) { return true; }
+        last = if !p.socket.exists() { "gateway socket" }
+            else if !p.relay.join("config/api.token").exists() { "relay api.token" }
+            else if !p.relay.join("config/relay.json").exists() { "relay listenPort" }
+            else { "relay /v1/daemon probe" };
         std::thread::sleep(Duration::from_millis(500));
     }
+    eprintln!("reposuite: health check timed out waiting for {last}");
     false
 }
 fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
@@ -263,6 +323,11 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     write_units(p, bin);
     if !systemd_ok() { ok("systemd --user unavailable — staged only"); return; }
     if !cmd_ok("systemctl", &["--user", "daemon-reload"]) { fail("daemon-reload failed"); }
+    // Orphans from a previous partial install hold the socket/port and would
+    // defeat the new units' bind — reap them before restart. Scoped strictly
+    // to executables inside this installation's versioned tree.
+    let orphans = owned_pids(p);
+    if !orphans.is_empty() { kill_pids(&orphans); }
     // enable only installs symlinks — it does NOT start units. Restart them
     // (start if not running) so the NEW binaries actually execute, then
     // verify both are active before health polling.
