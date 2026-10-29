@@ -96,7 +96,7 @@ def plat_pkg():
     }
 
 
-def pins_text(built, go="go1.27.1", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
+def pins_text(built, go="go1.27.3", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
     return (
         f"control=\ngateway={GW}\nrelay={RY}\n"
         f"distribution={DIST}\ngo={go}\nrust={rust}\nbuilt={built}\n"
@@ -292,7 +292,7 @@ def main():
     chk_reject("verify: mutated launcher rejected", r, "launcher")
 
     r = run_verify(sandbox(tmp / "badgo", pins_kw={"go": "go1.24.3"}))
-    chk_reject("verify: wrong go pin rejected", r, "go1.27.1")
+    chk_reject("verify: wrong go pin rejected", r, "go1.27.3")
 
     r = run_verify(good, env_extra={"RELAY_SHA": "not-hex"})
     chk_reject("verify: non-40hex env pin rejected", r, "40-hex")

@@ -2,7 +2,7 @@
 # Build the native binaries into packages/linux-x64/bin from pinned trees.
 set -euo pipefail
 : "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
-[ "$(go env GOVERSION)" = go1.27.1 ] || { echo "build: go1.27.1 required" >&2; exit 1; }
+[ "$(go env GOVERSION)" = go1.27.3 ] || { echo "build: go1.27.3 required" >&2; exit 1; }
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
 BUILT=$(date -u -d "@$SOURCE_DATE_EPOCH" +%FT%TZ)
 OUT=packages/linux-x64/bin

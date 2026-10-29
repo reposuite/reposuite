@@ -22,7 +22,7 @@ Contract (fail-closed on any violation):
     @reposuite/linux-x64 at the same version; both repository.url
     canonical; no install-time script hooks
   * PINS.txt strict key=value, no duplicates: distribution/gateway/relay
-    match manifest, go == go1.27.1, rust starts "rustc 1.93.1",
+    match manifest, go == go1.27.3, rust starts "rustc 1.93.1",
     built == manifest.built
   * entry launcher bytes == bin/reposuite.js in this checkout (frozen
     wrapper integrity)
@@ -247,13 +247,13 @@ def main():
     for k in ("distribution", "gateway", "relay"):
         if pins_kv.get(k) != pins.get(k):
             fail(f"PINS.txt {k} {pins_kv.get(k)!r} != manifest {pins.get(k)!r}")
-    if pins_kv.get("go") != "go1.27.1":
-        fail(f"PINS.txt go {pins_kv.get('go')!r} != go1.27.1")
+    if pins_kv.get("go") != "go1.27.3":
+        fail(f"PINS.txt go {pins_kv.get('go')!r} != go1.27.3")
     if not (pins_kv.get("rust") or "").startswith("rustc 1.93.1 "):
         fail(f"PINS.txt rust {pins_kv.get('rust')!r} does not start 'rustc 1.93.1 '")
     if pins_kv.get("built") != built:
         fail("PINS.txt built != manifest.built")
-    ok("PINS.txt: pins/go1.27.1/rustc-1.93.1/built all match")
+    ok("PINS.txt: pins/go1.27.3/rustc-1.93.1/built all match")
 
     # ---- frozen launcher integrity ------------------------------------------
     frozen = (root / "bin" / "reposuite.js").read_bytes()
