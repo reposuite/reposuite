@@ -29,3 +29,6 @@ revisions and independent live evidence become available.
   `swe-2-high`, and SGS Lead transfer await the Owner/WORK operator.
 - Browser tests needed unprivileged temporary copies of four missing shared
   libraries on this host; no system packages were installed.
+- The approved repository boundaries and current audit limitations are
+  recorded in `UI_CONTROL_OWNERSHIP_ADR.md`; durable audit and platform
+  authorization remain implementation gates, not completed capabilities.
