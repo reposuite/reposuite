@@ -96,10 +96,10 @@ def plat_pkg():
     }
 
 
-def pins_text(built, go="go1.27.3", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
+def pins_text(built, go_gateway="go1.27.3", go_relay="go1.27.1", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
     return (
         f"control=\ngateway={GW}\nrelay={RY}\n"
-        f"distribution={DIST}\ngo={go}\nrust={rust}\nbuilt={built}\n"
+        f"distribution={DIST}\ngo_gateway={go_gateway}\ngo_relay={go_relay}\nrust={rust}\nbuilt={built}\n"
     ).encode()
 
 
@@ -291,8 +291,10 @@ def main():
                            entry_over={"package/bin/reposuite.js": (b"// tampered\n", 0o644)}))
     chk_reject("verify: mutated launcher rejected", r, "launcher")
 
-    r = run_verify(sandbox(tmp / "badgo", pins_kw={"go": "go1.24.3"}))
+    r = run_verify(sandbox(tmp / "badgo", pins_kw={"go_gateway": "go1.24.3"}))
     chk_reject("verify: wrong go pin rejected", r, "go1.27.3")
+    r = run_verify(sandbox(tmp / "badrelaygo", pins_kw={"go_relay": "go1.27.3"}))
+    chk_reject("verify: wrong relay go pin rejected", r, "go1.27.1")
 
     r = run_verify(good, env_extra={"RELAY_SHA": "not-hex"})
     chk_reject("verify: non-40hex env pin rejected", r, "40-hex")
@@ -319,6 +321,34 @@ def main():
     r = subprocess.run(["bash", "scripts/release/prepare.sh", VERSION],
                        cwd=pre, env=env, capture_output=True, text=True)
     chk("prepare: untracked file rejected", r.returncode != 0 and "untracked" in r.stderr + r.stdout,
+        r.stderr)
+
+    # Build/packaging must never delete an existing candidate.
+    build_root = tmp / "existing-build"
+    out = build_root / "packages" / "linux-x64" / "bin"
+    out.mkdir(parents=True)
+    sentinel = out / "keep"
+    sentinel.write_text("old candidate")
+    fake_bin = tmp / "fake-go"
+    fake_bin.mkdir()
+    fake_go = fake_bin / "go"
+    fake_go.write_text('#!/bin/sh\nprintf "%s\\n" "$GOTOOLCHAIN"\n')
+    fake_go.chmod(0o755)
+    build_env = dict(os.environ, GATEWAY_SHA=GW, RELAY_SHA=RY,
+                     SOURCE_DATE_EPOCH="1", PATH=f"{fake_bin}:{os.environ['PATH']}")
+    r = subprocess.run(["bash", str(SCRIPTS / "build.sh")], cwd=build_root,
+                       env=build_env, capture_output=True, text=True)
+    chk("build: existing artifacts preserved",
+        r.returncode != 0 and "exists" in r.stderr and sentinel.read_text() == "old candidate", r.stderr)
+
+    pack_root = sandbox(tmp / "existing-pack")
+    candidate = pack_root / "release-artifacts" / f"reposuite-{VERSION}.tgz"
+    before = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    r = subprocess.run(["bash", str(SCRIPTS / "package.sh")], cwd=pack_root,
+                       env=dict(os.environ, GATEWAY_SHA=GW, RELAY_SHA=RY, SOURCE_DATE_EPOCH="1"),
+                       capture_output=True, text=True)
+    chk("package: existing artifacts preserved",
+        r.returncode != 0 and "exists" in r.stderr and hashlib.sha256(candidate.read_bytes()).hexdigest() == before,
         r.stderr)
 
     # ---------- publish.sh ----------

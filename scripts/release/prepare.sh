@@ -22,4 +22,24 @@ if [ -n "${CONTROL_SHA:-}" ]; then
   [ "$a" = "$CONTROL_SHA" ] || { echo "prepare: control SHA mismatch" >&2; exit 1; }
 fi
 
+cargo metadata --locked --no-deps --format-version 1 | node -e '
+  let data = "";
+  process.stdin.on("data", chunk => data += chunk);
+  process.stdin.on("end", () => {
+    const m = JSON.parse(data);
+    const p = m.packages.find(p => p.name === "reposuite");
+    if (!p || p.version !== process.argv[1]) {
+      console.error("prepare: Rust CLI version does not match package version");
+      process.exit(1);
+    }
+  });
+' "$V"
+node -e '
+  if (require("./packages/linux-x64/package.json").version !== process.argv[1] ||
+      require("./package.json").optionalDependencies["@reposuite/linux-x64"] !== process.argv[1]) {
+    console.error("prepare: platform package version mismatch");
+    process.exit(1);
+  }
+' "$V"
+
 echo "prepare: v$V OK (gateway=${GATEWAY_SHA:0:7} relay=${RELAY_SHA:0:7})"

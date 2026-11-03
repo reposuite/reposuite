@@ -436,8 +436,51 @@ fn paired(p: &Paths) -> bool {
         }).unwrap_or(false)
 }
 
-fn cloud_pair_begin(p: &Paths) -> Result<serde_json::Value, String> {
-    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair-begin", Some("{}"))
+#[derive(Default, Debug, PartialEq)]
+struct PairOptions { label: Option<String>, key: Option<String> }
+
+fn parse_pair_options(args: &[&str]) -> Result<PairOptions, String> {
+    let mut opts = PairOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i];
+        let value = args.get(i + 1).ok_or_else(|| format!("{flag} requires a value"))?.trim();
+        match flag {
+            "--label" if opts.label.is_none() => {
+                if value.is_empty() || value.len() > 32 || value.chars().any(char::is_control) {
+                    return Err("label must be printable and at most 32 bytes".into());
+                }
+                opts.label = Some(value.to_string());
+            }
+            "--key" if opts.key.is_none() => {
+                let key = value.to_ascii_uppercase();
+                let bytes = key.as_bytes();
+                if !(3..=12).contains(&bytes.len()) || !bytes[0].is_ascii_alphanumeric()
+                    || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
+                    || !bytes.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'-') {
+                    return Err("key must be 3–12 ASCII letters or digits with interior hyphens".into());
+                }
+                opts.key = Some(key);
+            }
+            _ => return Err(format!("unknown or duplicate pair option: {flag}")),
+        }
+        i += 2;
+    }
+    if opts.key.is_none() {
+        if let Some(label) = &opts.label {
+            let key: String = label.to_ascii_uppercase().chars().filter(char::is_ascii_alphanumeric).take(4).collect();
+            if key.len() >= 3 { opts.key = Some(key); }
+        }
+    }
+    Ok(opts)
+}
+
+fn cloud_pair_begin(p: &Paths, opts: &PairOptions) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::Map::new();
+    if let Some(label) = &opts.label { body.insert("suggested_label".into(), label.clone().into()); }
+    if let Some(key) = &opts.key { body.insert("suggested_key".into(), key.clone().into()); }
+    let payload = serde_json::Value::Object(body).to_string();
+    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair-begin", Some(&payload))
         .ok_or("gateway socket unavailable")?;
     let v: serde_json::Value = serde_json::from_str(&b).unwrap_or(serde_json::Value::Null);
     if st == 200 { Ok(v) } else {
@@ -496,11 +539,11 @@ fn wait_paired_online(p: &Paths) -> i32 {
     2
 }
 
-fn cmd_pair(p: &Paths) {
+fn cmd_pair(p: &Paths, opts: &PairOptions) {
     if paired(p) { ok("already paired — revocation is a Control-side action"); return; }
     // Browser device-authorization flow (ADR-PAIR-001): the gateway daemon
     // owns the device_secret — it is never in argv/env/history here.
-    let begin = match cloud_pair_begin(p) {
+    let begin = match cloud_pair_begin(p, opts) {
         Ok(v) => v,
         Err(e) => die(&format!("cannot start browser pairing: {e} (use 'reposuite pair --invite' for manual pairing)")),
     };
@@ -711,8 +754,11 @@ fn main() {
     let sub: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     match sub.as_slice() {
         ["setup"] => cmd_setup(&p),
-        ["pair"] => cmd_pair(&p),
         ["pair", "--invite"] => cmd_pair_manual(&p),
+        ["pair", rest @ ..] => {
+            let opts = parse_pair_options(rest).unwrap_or_else(|e| die(&e));
+            cmd_pair(&p, &opts);
+        }
         ["doctor"] => std::process::exit(cmd_doctor(&p)),
         ["status"] => cmd_status(&p),
         ["start"] => service_op("start"),
@@ -725,6 +771,28 @@ fn main() {
         ["purge-state", rest @ ..] => cmd_purge(&p, rest.iter().any(|a| *a == "--yes")),
         ["migrate"] => { mkdir700(&p.root); migrate_legacy(&p); }
         ["version"] => println!("{VERSION}"),
-        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair             browser pairing (approve in web admin); --invite = manual invite\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)"),
+        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair [--label LABEL] [--key KEY]  browser pairing; --invite = manual invite\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)"),
+    }
+}
+
+#[cfg(test)]
+mod pair_option_tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_and_legacy_pair() {
+        assert_eq!(parse_pair_options(&[]).unwrap(), PairOptions::default());
+        assert_eq!(parse_pair_options(&["--label", "Work Linux"]).unwrap(),
+            PairOptions { label: Some("Work Linux".into()), key: Some("WORK".into()) });
+        assert_eq!(parse_pair_options(&["--key", "wrk", "--label", "Work Linux"]).unwrap(),
+            PairOptions { label: Some("Work Linux".into()), key: Some("WRK".into()) });
+    }
+
+    #[test]
+    fn rejects_bad_options() {
+        for args in [&["--key", "ab"][..], &["--key", "-ABC"][..], &["--label"][..],
+                     &["--key", "ABC", "--key", "DEF"][..]] {
+            assert!(parse_pair_options(args).is_err(), "{args:?}");
+        }
     }
 }

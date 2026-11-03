@@ -21,9 +21,19 @@ npm install -g reposuite          # or reposuite@beta
 ```bash
 reposuite setup                   # install versioned runtime + user services
 reposuite doctor                  # readiness checks
-reposuite pair                    # pair this machine (invite from the Web Admin — protected input, never argv)
+reposuite pair                    # approve this machine in the browser
 reposuite status                  # service + pairing + activation state
 ```
+
+Optionally suggest a label and key for the Owner to review and edit:
+
+```bash
+reposuite pair --label "Work Linux" --key WRK
+```
+
+These are unverified device suggestions, not authorization. When the key is
+omitted, a four-character suggestion is derived from the label. The Owner
+must compare the reference code and approve the final values in the browser.
 
 Bind a project checkout for agent execution:
 

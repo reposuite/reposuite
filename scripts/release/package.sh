@@ -6,7 +6,9 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
 DIST_SHA=$(git rev-parse HEAD)
 V=$(node -p 'require("./package.json").version')
 BUILT=$(date -u -d "@$SOURCE_DATE_EPOCH" +%FT%TZ)
-OUT=release-artifacts; rm -rf "$OUT"; mkdir -p "$OUT"
+OUT=release-artifacts
+[ ! -e "$OUT" ] || { echo "package: $OUT exists; use a clean disposable checkout" >&2; exit 1; }
+mkdir -p "$OUT"
 npm pack --pack-destination "$OUT" >/dev/null
 (cd packages/linux-x64 && npm pack --pack-destination "../../$OUT" >/dev/null)
 (cd "$OUT" && sha256sum *.tgz > SHA256SUMS && cat > manifest.json <<EOF2
