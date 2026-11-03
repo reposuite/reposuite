@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,12 +186,16 @@ fn relay_probe(p: &Paths) -> Option<serde_json::Value> {
     if st != 200 { return None; }
     serde_json::from_str(&body).ok()
 }
-/// -1 = unknown (token exists, API unreachable) → deny activation.
+/// -1 = unknown → deny activation.
 fn running_sessions(p: &Paths) -> i64 {
-    if !p.relay.join("config/api.token").exists() { return 0; }
     match relay_probe(p) {
-        Some(j) => j.pointer("/daemon/activeSessions").and_then(|v| v.as_i64())
-            .or_else(|| j.pointer("/daemon/sessionCount").and_then(|v| v.as_i64())).unwrap_or(0),
+        Some(j) => {
+            let count = match j.pointer("/daemon/activeSessions") {
+                Some(v) => v.as_i64(),
+                None => j.pointer("/daemon/sessionCount").and_then(|v| v.as_i64()),
+            };
+            count.filter(|n| *n >= 0).unwrap_or(-1)
+        },
         None => -1,
     }
 }
@@ -659,8 +663,13 @@ fn cmd_update_apply(p: &Paths) {
         die("Relay state unknown — deferring activation (fail closed)");
     }
     let b = pkg_bin_dir().unwrap_or_else(|| die("new package carries no platform binaries"));
-    let vdir = p.versions.join(VERSION).join("bin");
-    mkdir700(&vdir);
+    mkdir700(&p.versions);
+    let version_dir = p.versions.join(VERSION);
+    fs::DirBuilder::new().mode(0o700).create(&version_dir)
+        .unwrap_or_else(|e| die(&format!("cannot stage {VERSION} without overwriting an existing version: {e}")));
+    let vdir = version_dir.join("bin");
+    fs::DirBuilder::new().mode(0o700).create(&vdir)
+        .unwrap_or_else(|e| die(&format!("cannot create staging directory: {e}")));
     for f in OWNED_BINS { fs::copy(b.join(f), vdir.join(f)).unwrap_or_else(|e| die(&format!("copy {f}: {e}"))); }
     apply_runtime(p, VERSION, &vdir);
     ok(&format!("activated {VERSION}{}", cur.filter(|c| c != VERSION).map(|c| format!(" (previous {c} kept for rollback)")).unwrap_or_default()));

@@ -86,15 +86,26 @@ function startHealthServer() {
   // Host bug in the CLI can never pass this fixture again.
   const src = `const http=require('http');const s=http.createServer((q,r)=>{
     const port=s.address().port;
-    if(q.headers.authorization!=='Bearer testtoken'){r.writeHead(401);return r.end('{}');}
+    if(!['Bearer testtoken','Bearer malformed','Bearer negative','Bearer active'].includes(q.headers.authorization)){r.writeHead(401);return r.end('{}');}
     if(q.headers.host!=='127.0.0.1:'+port){r.writeHead(421);return r.end('{}');}
     r.writeHead(200,{'content-type':'application/json'});
-    r.end(JSON.stringify({daemon:{apiVersion:2,activeSessions:0,sessionCount:0}}));});
+    const token=q.headers.authorization;
+    const daemon=token==='Bearer malformed' ? {apiVersion:2}
+      : token==='Bearer negative' ? {apiVersion:2,activeSessions:-1,sessionCount:0}
+      : token==='Bearer active' ? {apiVersion:2,activeSessions:1,sessionCount:1}
+      : {apiVersion:2,activeSessions:0,sessionCount:0};
+    r.end(JSON.stringify({daemon}));});
     s.listen(0,'127.0.0.1',()=>console.log(s.address().port));`;
   const child = spawn('node', ['-e', src], { stdio: ['ignore', 'pipe', 'inherit'] });
   return new Promise(resolve => {
     child.stdout.once('data', d => resolve({ port: parseInt(String(d).trim(), 10), child }));
   });
+}
+
+function seedRelayHealth(paths, port, token = 'testtoken') {
+  fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
+  fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), token, { mode: 0o600 });
+  fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
 }
 
 async function main() {
@@ -105,6 +116,7 @@ async function main() {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.1');
     pkgBin(t);
+    seedRelayHealth(paths, port);
     const r = run(t, { ...env, REPOSUITE_FAULT_INJECT: 'start' }, ['update-apply']);
     const cur = fs.readlinkSync(paths.current);
     const unit = fs.readFileSync(path.join(paths.units, 'reposuite-gateway.service'), 'utf8');
@@ -120,6 +132,7 @@ async function main() {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.1');
     pkgBin(t);
+    seedRelayHealth(paths, port);
     const r = run(t, { ...env, REPOSUITE_FAULT_INJECT: 'health' }, ['update-apply']);
     chk('health failure exits nonzero', r.status !== 0);
     chk('health failure restores previous version', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
@@ -131,9 +144,7 @@ async function main() {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.1');
     pkgBin(t);
-    fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), 'testtoken', { mode: 0o600 });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
+    seedRelayHealth(paths, port);
     fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
     fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
     const r = run(t, env, ['update-apply']);
@@ -147,6 +158,7 @@ async function main() {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.1');
     pkgBin(t);
+    seedRelayHealth(paths, port);
     // shim: every non-is-active verb fails → the apply fails AND the
     // restore restart fails; CLI must report RECOVERY FAILED, not success.
     fs.writeFileSync(path.join(env.PATH.split(':')[0], 'systemctl'), `#!/bin/sh
@@ -169,6 +181,7 @@ esac
   {
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.2');
+    seedRelayHealth(paths, port);
     // older version 0.0.1 present as rollback target
     const vOld = path.join(paths.data, 'reposuite', 'versions', '0.0.1', 'bin');
     fs.mkdirSync(vOld, { recursive: true });
@@ -204,9 +217,7 @@ esac
     const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
     const { env, paths } = setupEnv(t, '0.0.1');
     pkgBin(t);
-    fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), 'testtoken', { mode: 0o600 });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
+    seedRelayHealth(paths, port);
     fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
     fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
     const r = run(t, env, ['setup']);
@@ -227,9 +238,7 @@ esac
     const sleeper = path.join(paths.data, 'reposuite', 'versions', '0.0.1', 'bin', 'reposuite-gateway');
     fs.copyFileSync('/bin/sleep', sleeper); fs.chmodSync(sleeper, 0o755);
     const orphan = spawn(sleeper, ['600'], { detached: true }).pid;
-    fs.mkdirSync(path.join(paths.rsr, 'config'), { recursive: true });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'api.token'), 'testtoken', { mode: 0o600 });
-    fs.writeFileSync(path.join(paths.rsr, 'config', 'relay.json'), JSON.stringify({ listenPort: port }));
+    seedRelayHealth(paths, port);
     fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
     fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
     const r = run(t, env, ['setup']);
@@ -239,6 +248,37 @@ esac
     chk('orphan daemon reaped', !fs.existsSync(`/proc/${orphan}/exe`));
     chk('activation recorded after orphan reap', fs.existsSync(paths.current));
     try { process.kill(orphan, 'SIGKILL'); } catch {}
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // Unknown or malformed Relay state must never be interpreted as idle.
+  for (const mode of ['missing', 'malformed', 'negative', 'active']) {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    pkgBin(t);
+    if (mode !== 'missing') seedRelayHealth(paths, port, mode);
+    const r = run(t, env, ['update-apply']);
+    const expected = mode === 'active' ? /session\(s\) running/ : /Relay state unknown/;
+    chk(`${mode} Relay state defers update`, r.status !== 0 && expected.test(r.stderr + r.stdout));
+    chk(`${mode} state preserves current runtime`, path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
+    const ver = execFileSync(CLI, ['version'], { encoding: 'utf8' }).trim();
+    chk(`${mode} state does not stage binaries`, !fs.existsSync(path.join(paths.data, 'reposuite', 'versions', ver)));
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1');
+    pkgBin(t);
+    seedRelayHealth(paths, port);
+    const ver = execFileSync(CLI, ['version'], { encoding: 'utf8' }).trim();
+    const staged = path.join(paths.data, 'reposuite', 'versions', ver, 'bin');
+    fs.mkdirSync(staged, { recursive: true });
+    fs.writeFileSync(path.join(staged, 'reposuite-gateway'), 'do not replace');
+    const r = run(t, env, ['update-apply']);
+    chk('existing version refuses overwrite', r.status !== 0 && /without overwriting/.test(r.stderr + r.stdout));
+    chk('existing version remains intact', fs.readFileSync(path.join(staged, 'reposuite-gateway'), 'utf8') === 'do not replace');
+    chk('existing version leaves current unchanged', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
     fs.rmSync(t, { recursive: true, force: true });
   }
 
