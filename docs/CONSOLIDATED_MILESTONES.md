@@ -10,7 +10,7 @@ revisions and independent live evidence become available.
 | UI_FOUNDATION_READY | IN_PROGRESS | CODE_READY and TEST_VERIFIED candidate `@reposuite/ui` `0.1.0`, `feature/shared-ui-v1`, `4c0cc7b163dadd5b7939bd682e61e27773014595`. Frozen design check, Svelte check, package build/publint, packed consumer build and Chromium desktop/mobile interaction tests passed. Both local App and Admin consume that exact commit using a local Git mirror. The commit is not pushed or published; remote installation is not verified. |
 | CUSTOMER_APP_READY | IN_PROGRESS | CODE_READY locally: `reposuite-app`, `feature/customer-app-extraction`, `89e2e8f4b5720dd7de80b36ac4bf41e8400a6903`, shared UI `0.1.0` at `4c0cc7b163dadd5b7939bd682e61e27773014595`. Frozen lockfile install, typecheck, build and five browser tests against mock API passed, including fail-closed pairing availability, CSRF headers and consent form fields. This does not prove backend authorization, real cookies, OAuth, or live pairing. Private Git access and container build remain unverified; no deployment, rollback rehearsal or live HOME check has occurred. |
 | ADMIN_ACCESS_READY | IN_PROGRESS | Cloudflare Access application and one allow policy created and read back successfully for `admin.reposuite.com` only; the existing email OTP identity provider is selected, the allowlist contains only `therceman@gmail.com`, and session duration is 24 hours. The `admin.reposuite.com` DNS record is absent, so no live OTP challenge or origin-bypass check is possible yet. App and API DNS records remain proxied; no DNS changes were made. Owner must personally test OTP after a protected Admin origin is deployed. |
-| PLATFORM_ADMIN_FOUNDATION_READY | IN_PROGRESS | Local placeholder `reposuite-admin`, `feature/platform-admin-foundation`, `a1478a60a923f0353ccc12c84e90adbdaf39fc1d`, shared UI `0.1.0` at `4c0cc7b163dadd5b7939bd682e61e27773014595`. Frozen lockfile install, typecheck, build and two browser tests pass. Local uncommitted Control changes on `feature/browser-pairing-v2` add a role probe requiring a live session and explicit role, plus trusted-console grant/revoke with durable audit; Go full suite and targeted race tests pass. No role has been granted in production, and no privileged browser operations, platform data or Admin API integration exist yet. Admin deployment, protected origin, host-only session/CSRF contract, authorized views, and cross-account isolation tests remain required. |
+| PLATFORM_ADMIN_FOUNDATION_READY | IN_PROGRESS | Local Admin `reposuite-admin`, `feature/platform-admin-foundation`, `b1f9f62e46af487326b001203f18057a038d96f2`, shared UI `0.1.0` at `4c0cc7b163dadd5b7939bd682e61e27773014595`. Typecheck, build and eight mock-API browser tests pass. Local Control `reposuite-gw`, `feature/browser-pairing-v2`, `57df32b89684d6d598a010b0c177524d6fdfcee0`, implements role probe, trusted-console grant/revoke, admin host restriction, Origin/CSRF logout and scoped login Origin checks. Go full suite, targeted race tests and local TLS session-isolation tests pass; govulncheck reports zero reachable findings and one module-only finding. No production role grant, platform data or privileged browser operations exist. Admin deployment, protected origin, live host-only session/CSRF and cross-account API verification remain required. |
 | LEGACY_WEB_ADMIN_REMOVED | IN_PROGRESS | Intentionally retained in `reposuite-server/web-admin` until customer and admin deployments, authentication/OAuth/connection smoke tests, rollback and live verification all pass. |
 
 ## Deployment and risks
@@ -28,12 +28,14 @@ revisions and independent live evidence become available.
   exists, but server-side provisioning and OAuth integration remain pending.
 - Legacy local secrets were copied into the rootless local store: 13 values and
   8 aliases were verified without printing values, using `edge-infra`
-  `docs/helsinki-rebuild-readiness` at `d521c1b51a8585f2e7c1752433641d2061386c73`.
+  `docs/helsinki-rebuild-readiness` at `0b2f25029c2a3ba2521bfeb22c4307c2b87a816a`.
   The legacy DB and backup remain because the existing env resolver and VPS
   backup/restore still use them. The import is a snapshot, not ongoing sync;
-  no production consumer was switched. Local legacy directory/file permissions
-  were restricted to the owner. Targeted migration tests pass; `make env_test`
-  has one unrelated existing nginx-template assertion failure.
+  no production consumer was switched. Opt-in local resolver parity passed for
+  all 11 current RepoSuite and VPSDesk env references; legacy writes and VPS
+  sync fail closed in this mode. Local legacy directory/file permissions were
+  restricted to the owner. Targeted migration tests pass; `make env_test` has
+  one unrelated existing nginx-template assertion failure.
 - The Gateway runtime requires `libsqlite3.so.0` and compatible glibc. A
   minimal Debian container without SQLite could not start it; WORK must pass
   the handoff preflight. The static CLI itself starts there.
