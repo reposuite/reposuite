@@ -5,6 +5,7 @@
 - Add optional pairing label and Gateway Key suggestions.
 - Pin the Gateway and Relay Go toolchains separately and verify the native CLI version.
 - Preserve existing build and release artifacts by requiring a clean build checkout.
+- Build a static CLI and reject Gateway binaries requiring newer than glibc 2.35.
 
 ## 0.3.0-beta.2 — 2026-10-27
 - Align `reposuite-gateway` embedded Cloud `GatewayHello` / `GatewayHelloResult` wire JSON field (`gateway`) with deployed RepoSuite Control (`4a828d2`)

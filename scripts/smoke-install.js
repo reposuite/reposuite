@@ -19,7 +19,7 @@ chk('node wrapper is launcher-only', () => {
   return /spawn\(bin, process\.argv\.slice\(2\)/.test(w) && !/systemctl/.test(w) && w.length < 2000;
 });
 chk('rust CLI source present', () => require('fs').existsSync(require('path').join(__dirname, '..', 'src', 'main.rs')));
-const rustBin = require('path').join(__dirname, '..', 'target', 'release', 'reposuite');
+const rustBin = process.env.REPOSUITE_CLI || require('path').join(__dirname, '..', 'target', 'release', 'reposuite');
 chk('rust CLI built + version matches', () => {
   if (!require('fs').existsSync(rustBin)) return true; // not built in this env
   return execFileSync(rustBin, ['version'], { encoding: 'utf8' }).trim() === pkg.version;
@@ -39,7 +39,7 @@ chk('launcher forwards version (real platform layout)', () => {
   try {
     const plat = path.join(t2, '@reposuite', 'linux-x64', 'bin');
     fs.mkdirSync(plat, { recursive: true });
-    const rust = path.join(__dirname, '..', 'target', 'release', 'reposuite');
+    const rust = rustBin;
     const native = fs.existsSync(rust) ? rust : null;
     if (!native) return true; // rust not built here
     fs.copyFileSync(native, path.join(plat, 'reposuite'));
