@@ -2,6 +2,13 @@
 const path = require("path");
 const { spawn } = require("child_process");
 
+if (process.argv[2] === "status") {
+  require("../lib/setup").status(process.argv.slice(3)).catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+  return;
+}
 if (process.argv[2] === "setup") {
   require("../lib/setup").run(process.argv.slice(3)).catch((error) => {
     console.error(error.message);

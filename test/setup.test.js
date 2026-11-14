@@ -46,6 +46,8 @@ test('code pairing stores invite privately and never prints device secret', asyn
   const lines = r.out.trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(lines[0].verification_url, 'https://app.example/pair?r=p1');
   assert.equal(lines[0].code, 'ABCD-EFGH');
+  assert.equal(lines[0].status, 'pending');
+  assert.equal(lines[0].action_required, true);
   assert.doesNotMatch(r.out, /secret-value/);
   const invite = fs.readFileSync(path.join(dir, 'invite'), 'utf8').trim();
   assert.equal(invite, 'inv_test.invite-secret');
@@ -70,4 +72,18 @@ test('rejects a non-code auth mode', async () => {
   const r = await run(['setup', 'WRK', 'work-pc', '--auth-mode', 'password']);
   assert.equal(r.code, 2);
   assert.match(r.err, /auth-mode code/);
+});
+
+test('status and cancel use local authorized state only', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reposuite-status-'));
+  fs.writeFileSync(path.join(dir, 'gateway.json'), JSON.stringify({ gateway: 'WRK', label: 'work-pc', server: 'https://app.reposuite.com' }));
+  fs.mkdirSync(path.join(dir, 'connector'));
+  fs.writeFileSync(path.join(dir, 'connector', 'gateway.json'), '{}');
+  const r = await run(['status', '--json', '--state-dir', dir]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(JSON.parse(r.out).online, true);
+  fs.writeFileSync(path.join(dir, 'pending.json'), JSON.stringify({ pair_id: 'p', device_secret: 's', server: 'http://127.0.0.1:1' }));
+  const c = await run(['setup', 'cancel', '--json', '--state-dir', dir]);
+  assert.equal(c.code, 0, c.err);
+  assert.equal(fs.existsSync(path.join(dir, 'pending.json')), false);
 });
