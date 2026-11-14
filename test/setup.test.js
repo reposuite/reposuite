@@ -40,7 +40,7 @@ test('code pairing stores invite privately and never prints device secret', asyn
   const s = server('ok'); await new Promise((r) => s.listen(0, '127.0.0.1', r));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reposuite-setup-'));
   const { port } = s.address();
-  const r = await run(['setup', 'WRK', 'work-pc', '--auth-mode', 'code', '--json', '--server', `http://127.0.0.1:${port}`, '--state-dir', dir]);
+  const r = await run(['setup', 'WRK', 'work-pc', '--auth-mode', 'code', '--json', '--no-start', '--server', `http://127.0.0.1:${port}`, '--state-dir', dir]);
   s.close();
   assert.equal(r.code, 0, r.err);
   const lines = r.out.trim().split('\n').map((line) => JSON.parse(line));
@@ -60,7 +60,7 @@ test('expired pairing fails and writes no invite', async () => {
   const s = server('expired'); await new Promise((r) => s.listen(0, '127.0.0.1', r));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reposuite-setup-'));
   const { port } = s.address();
-  const r = await run(['setup', 'WRK', 'work-pc', '--auth-mode', 'code', '--server', `http://127.0.0.1:${port}`, '--state-dir', dir]);
+  const r = await run(['setup', 'WRK', 'work-pc', '--auth-mode', 'code', '--no-start', '--server', `http://127.0.0.1:${port}`, '--state-dir', dir]);
   s.close();
   assert.notEqual(r.code, 0);
   assert.equal(fs.existsSync(path.join(dir, 'invite')), false);
