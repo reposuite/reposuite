@@ -19,6 +19,8 @@ function server(mode) {
       } else if (req.url === '/v1/pairing/poll') {
         if (mode === 'expired') return res.end(JSON.stringify({ status: 'expired' }));
         res.end(JSON.stringify({ status: 'authorized', invite_id: 'inv_test', invite_token: 'invite-secret' }));
+      } else if (req.url === '/v1/enroll/claim') {
+        res.end(JSON.stringify({ invite_id: 'inv_key', invite_token: 'key-secret' }));
       } else { res.statusCode = 404; res.end('{}'); }
     });
   });
@@ -86,4 +88,16 @@ test('status and cancel use local authorized state only', async () => {
   const c = await run(['setup', 'cancel', '--json', '--state-dir', dir]);
   assert.equal(c.code, 0, c.err);
   assert.equal(fs.existsSync(path.join(dir, 'pending.json')), false);
+});
+
+test('API key enrollment claims one gateway without pairing', async () => {
+  const s = server('ok'); await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reposuite-apikey-'));
+  const keyFile = path.join(dir, 'key'); fs.writeFileSync(keyFile, 'secret-key', { mode: 0o600 });
+  const { port } = s.address();
+  const r = await run(['setup', 'WRK', 'work-pc', '--api-key-file', keyFile, '--json', '--no-start', '--server', `http://127.0.0.1:${port}`, '--state-dir', dir]);
+  s.close();
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.out, /secret-key/);
+  assert.equal(fs.readFileSync(path.join(dir, 'invite'), 'utf8').trim(), 'inv_key.key-secret');
 });
