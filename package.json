@@ -12,6 +12,7 @@
   },
   "files": [
     "bin/",
+    "lib/",
     "assets/",
     "scripts/",
     "README.md",
