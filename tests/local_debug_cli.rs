@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn fixture(tag: &str) -> PathBuf {
+fn fixture(tag: &str) -> Fixture {
     let base = env!("CARGO_TARGET_TMPDIR").to_string();
     let d = Path::new(&base).join(format!("dbg-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
@@ -15,23 +15,37 @@ fn fixture(tag: &str) -> PathBuf {
     for sub in ["data", "config", "run"] {
         fs::create_dir_all(d.join(sub)).unwrap();
     }
-    d
+    Fixture(d)
 }
 
 fn write_cfg(home: &Path, body: &str) {
     fs::write(home.join(".reposuite/config.json"), body).unwrap();
 }
 
-fn snapshot(d: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+fn snapshot(d: &Path) -> Vec<(String, Vec<u8>)> {
+    // Recursive: relative path -> bytes (empty marker for directories).
     let mut v = Vec::new();
-    for e in fs::read_dir(d).unwrap() {
-        let p = e.unwrap().path();
-        if p.is_file() {
-            v.push((p.clone(), fs::read(&p).unwrap()));
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+            if p.is_dir() {
+                out.push((rel + "/", Vec::new()));
+                walk(base, &p, out);
+            } else {
+                out.push((rel, fs::read(&p).unwrap()));
+            }
         }
     }
+    walk(d, d, &mut v);
     v.sort();
     v
+}
+
+struct Fixture(PathBuf);
+impl Fixture { fn path(&self) -> &Path { &self.0 } }
+impl Drop for Fixture {
+    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
 }
 
 fn run(home: Option<&Path>, args: &[&str]) -> Output {
@@ -76,16 +90,16 @@ fn gate_matrix_process_level() {
         ("[1,2]", false),
         ("\"x\"", false),
     ] {
-        write_cfg(&h, body);
-        let o = run(Some(&h), &["debug", "paths"]);
+        write_cfg(h.path(), body);
+        let o = run(Some(h.path()), &["debug", "paths"]);
         assert_eq!(o.status.success(), want_ok, "body={body}");
         if !want_ok {
             assert!(stderr(&o).contains("debug disabled"), "{body}: {}", stderr(&o));
         }
     }
     // missing file
-    fs::remove_file(h.join(".reposuite/config.json")).unwrap();
-    let o = run(Some(&h), &["debug", "paths"]);
+    fs::remove_file(h.path().join(".reposuite/config.json")).unwrap();
+    let o = run(Some(h.path()), &["debug", "paths"]);
     assert!(!o.status.success());
     assert!(stderr(&o).contains("config missing"));
 }
@@ -93,11 +107,11 @@ fn gate_matrix_process_level() {
 #[test]
 fn json_output_single_object_and_exit_status() {
     let h = fixture("json");
-    write_cfg(&h, "{\"debug_mode\": true}");
+    write_cfg(h.path(), "{\"debug_mode\": true}");
     for args in [&["debug", "paths", "--json"][..],
                  &["debug", "--json", "paths"][..],
                  &["debug", "config", "--json"][..]] {
-        let o = run(Some(&h), args);
+        let o = run(Some(h.path()), args);
         assert!(o.status.success(), "{args:?}: {}", stderr(&o));
         let v: serde_json::Value =
             serde_json::from_str(stdout(&o).trim()).expect("one JSON object");
@@ -105,7 +119,7 @@ fn json_output_single_object_and_exit_status() {
         assert!(v.get("action").is_some());
     }
     // error path: exactly one JSON object, nonzero exit
-    let o = run(Some(&h), &["debug", "bogus", "--json"]);
+    let o = run(Some(h.path()), &["debug", "bogus", "--json"]);
     assert_eq!(o.status.code(), Some(1));
     let v: serde_json::Value =
         serde_json::from_str(stdout(&o).trim()).expect("one error object");
@@ -117,22 +131,23 @@ fn json_output_single_object_and_exit_status() {
 #[test]
 fn text_errors_on_stderr_and_secret_never_printed() {
     let h = fixture("text");
-    write_cfg(&h, "{\"debug_mode\": true, \"secret_marker\": \"S3CR3T-XYZZY\"}");
-    let o = run(Some(&h), &["debug", "paths"]);
-    assert!(o.status.success());
+    write_cfg(h.path(), "{\"debug_mode\": true, \"secret_marker\": \"S3CR3T-XYZZY\"}");
+    let o = run(Some(h.path()), &["debug", "paths"]);
+    assert_eq!(o.status.code(), Some(0));
     assert!(stdout(&o).contains("root="), "text paths output");
     assert!(stderr(&o).is_empty());
-    for mode in [&["paths"][..], &["config"][..], &["paths", "--json"][..]] {
+    for mode in [&["paths"][..], &["config"][..], &["paths", "--json"][..],
+                 &["config", "--json"][..]] {
         let args: Vec<&str> = std::iter::once("debug")
             .chain(mode.iter().copied()).collect();
-        let o = run(Some(&h), &args);
+        let o = run(Some(h.path()), &args);
         let all = format!("{}{}", stdout(&o), stderr(&o));
         assert!(!all.contains("S3CR3T-XYZZY"), "secret leaked: {mode:?}");
         assert!(!all.contains("secret_marker"), "key name leaked");
     }
     // disabled error is stderr text, stdout empty
-    fs::write(h.join(".reposuite/config.json"), "{\"debug_mode\": false}").unwrap();
-    let o = run(Some(&h), &["debug", "paths"]);
+    fs::write(h.path().join(".reposuite/config.json"), "{\"debug_mode\": false}").unwrap();
+    let o = run(Some(h.path()), &["debug", "paths"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stdout(&o).is_empty());
     assert!(stderr(&o).contains("debug disabled"));
@@ -141,12 +156,23 @@ fn text_errors_on_stderr_and_secret_never_printed() {
 #[test]
 fn no_file_mutations() {
     let h = fixture("nomut");
-    write_cfg(&h, "{\"debug_mode\": true}");
-    let before = snapshot(&h);
+    write_cfg(h.path(), "{\"debug_mode\": true}");
+    // nested sentinel proves recursive snapshot reaches deep files
+    fs::write(h.path().join("data/sentinel.bin"), b"sentinel").unwrap();
+    let before = snapshot(h.path());
+    assert!(before.iter().any(|(p, _)| p == ".reposuite/config.json"),
+            "snapshot must include nested config.json: {before:?}");
+    assert!(before.iter().any(|(p, _)| p == "data/sentinel.bin"),
+            "snapshot must include nested sentinel: {before:?}");
     for args in [&["debug", "paths"][..], &["debug", "config"][..],
-                 &["debug", "paths", "--json"][..]] {
-        let o = run(Some(&h), args);
-        assert!(o.status.success());
+                 &["debug", "paths", "--json"][..], &["debug", "config", "--json"][..]] {
+        let o = run(Some(h.path()), args);
+        assert_eq!(o.status.code(), Some(0), "{args:?}");
     }
-    assert_eq!(snapshot(&h), before, "debug must not write files");
+    assert_eq!(snapshot(h.path()), before, "debug must not write files");
+    // prove the snapshot is sensitive: intentional mutation then restore
+    fs::write(h.path().join("data/sentinel.bin"), b"MUTATED").unwrap();
+    assert_ne!(snapshot(h.path()), before, "snapshot must detect mutation");
+    fs::write(h.path().join("data/sentinel.bin"), b"sentinel").unwrap();
+    assert_eq!(snapshot(h.path()), before);
 }
