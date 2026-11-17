@@ -37,6 +37,13 @@ jobs:
       gateway_sha: ${{ steps.pins.outputs.gateway_sha }}
       relay_sha: ${{ steps.pins.outputs.relay_sha }}
     steps:
+      - name: pin job temp to runner.temp
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || { echo "RUNNER_TEMP unset or not a directory" >&2; exit 1; }
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DISTRIBUTION_SHA }}
@@ -101,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          KEY=$(mktemp); chmod 600 "$KEY"; trap 'rm -f "$KEY"' EXIT
+          KEY=$(mktemp "${RUNNER_TEMP:-$TMPDIR}/rs-release-key.XXXXXX"); chmod 600 "$KEY"; trap 'rm -f "$KEY"' EXIT
           fetch() { # repo dest sha keyvar
             printf '%s\n' "${!4}" > "$KEY"
             mkdir -p "$2" && git -C "$2" init -q
@@ -147,7 +154,7 @@ jobs:
       - name: install smoke — clean HOME on ubuntu-22.04 (glibc 2.35)
         run: |
           set -euo pipefail
-          T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+          T=$(mktemp -d "${RUNNER_TEMP:-$TMPDIR}/rs-smoke-home.XXXXXX"); trap 'rm -rf "$T"' EXIT
           export HOME="$T/home" XDG_DATA_HOME="$T/home/.local/share" XDG_CONFIG_HOME="$T/home/.config" XDG_RUNTIME_DIR="$T/run"
           mkdir -p "$HOME" "$T/run" "$T/prefix" "$T/cache"
           V=$(node -p 'require("./package.json").version')
@@ -213,6 +220,13 @@ jobs:
       RELAY_SHA: ${{ needs.verify.outputs.relay_sha }}
       NPM_TAG: ${{ inputs.tag }}
     steps:
+      - name: pin job temp to runner.temp
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || { echo "RUNNER_TEMP unset or not a directory" >&2; exit 1; }
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.verify.outputs.distribution_sha }}
