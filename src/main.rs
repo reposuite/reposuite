@@ -757,6 +757,110 @@ fn migrate_legacy(p: &Paths) {
     }
 }
 
+// ---- local debug: strict read-only config gate, no env fallback ----
+#[derive(Debug, PartialEq)]
+enum DebugGate { Enabled, Missing, Malformed, NotObject, NotBool }
+
+struct DebugConfig { gate: DebugGate, path: PathBuf }
+
+fn debug_config(home: &Path) -> DebugConfig {
+    let path = home.join(".reposuite/config.json");
+    let gate = match fs::read_to_string(&path) {
+        Err(_) => DebugGate::Missing,
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Err(_) => DebugGate::Malformed,
+            Ok(v) if !v.is_object() => DebugGate::NotObject,
+            Ok(v) => match v.get("debug_mode") {
+                Some(serde_json::Value::Bool(true)) => DebugGate::Enabled,
+                _ => DebugGate::NotBool,
+            },
+        },
+    };
+    DebugConfig { gate, path }
+}
+
+fn debug_home() -> Option<PathBuf> {
+    env::var("HOME").ok().filter(|h| !h.is_empty()).map(PathBuf::from)
+}
+
+fn debug_reason(g: &DebugGate) -> &'static str {
+    match g {
+        DebugGate::Enabled => "enabled",
+        DebugGate::Missing => "config missing",
+        DebugGate::Malformed => "config malformed",
+        DebugGate::NotObject => "config not a JSON object",
+        DebugGate::NotBool => "debug_mode not literal true",
+    }
+}
+
+// Returns Ok(output) or Err(message). Caller formats/prints.
+fn debug_execute(p: &Paths, cfg: &DebugConfig, action: Option<&str>)
+    -> Result<serde_json::Value, String>
+{
+    if cfg.gate != DebugGate::Enabled {
+        return Err(format!("debug disabled ({})", debug_reason(&cfg.gate)));
+    }
+    match action {
+        Some("paths") => Ok(serde_json::json!({
+            "action": "paths",
+            "paths": {
+                "root": p.root, "versions": p.versions, "current": p.current,
+                "gateway": p.gateway, "relay": p.relay,
+                "env_file": p.env_file, "socket": p.socket, "units": p.units,
+            }
+        })),
+        Some("config") => Ok(serde_json::json!({
+            "action": "config",
+            "enabled": true,
+            "detail": debug_reason(&cfg.gate),
+            "config_path": cfg.path,
+        })),
+        _ => Err("usage: reposuite debug <paths|config> [--json]".into()),
+    }
+}
+
+fn render_debug(v: &serde_json::Value, json: bool) -> String {
+    if json { return serde_json::to_string(v).unwrap_or_default(); }
+    let mut out = String::new();
+    match v.get("action").and_then(|a| a.as_str()) {
+        Some("paths") => {
+            if let Some(m) = v.get("paths").and_then(|x| x.as_object()) {
+                for (k, val) in m {
+                    out.push_str(&format!("{k}={}\n", val.as_str().unwrap_or("")));
+                }
+            }
+        }
+        Some("config") => {
+            out.push_str(&format!("enabled={}\ndetail={}\nconfig={}\n",
+                v["enabled"], v["detail"].as_str().unwrap_or(""),
+                v["config_path"].as_str().unwrap_or("")));
+        }
+        _ => {}
+    }
+    out.trim_end().to_string()
+}
+
+fn cmd_debug(p: &Paths, args: &[&str]) -> i32 {
+    let json = args.iter().any(|a| *a == "--json");
+    let rest: Vec<&str> = args.iter().filter(|a| **a != "--json").copied().collect();
+    let action = match rest.as_slice() { [a] => Some(*a), _ => None };
+    let cfg = match debug_home() {
+        Some(h) => debug_config(&h),
+        None => DebugConfig { gate: DebugGate::Missing, path: PathBuf::new() },
+    };
+    match debug_execute(p, &cfg, action) {
+        Ok(v) => { println!("{}", render_debug(&v, json)); 0 }
+        Err(e) => {
+            if json {
+                println!("{}", serde_json::json!({"ok": false, "error": e}));
+            } else {
+                eprintln!("reposuite: {e}");
+            }
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let p = paths();
@@ -779,8 +883,9 @@ fn main() {
         ["uninstall"] => cmd_uninstall(&p),
         ["purge-state", rest @ ..] => cmd_purge(&p, rest.iter().any(|a| *a == "--yes")),
         ["migrate"] => { mkdir700(&p.root); migrate_legacy(&p); }
+        ["debug", rest @ ..] => std::process::exit(cmd_debug(&p, rest)),
         ["version"] => println!("{VERSION}"),
-        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair [--label LABEL] [--key KEY]  browser pairing; --invite = manual invite\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)"),
+        _ => println!("reposuite <command>\n\n  setup            install+enable user services (versioned runtime)\n  doctor           readiness checks (pre-pair / services / cloud)\n  pair [--label LABEL] [--key KEY]  browser pairing; --invite = manual invite\n  start|stop|restart|status   service control + state\n  update check     compare installed vs npm channel\n  update apply     activate safely (defers on live/unknown sessions)\n  rollback         re-activate the previous runtime version\n  migrate          idempotent legacy-state migration\n  uninstall        remove units+activation, preserve state\n  purge-state      remove all owned state roots (explicit)\n  debug <action>   local diagnostics (enabled via debug_mode=true in ~/.reposuite/config.json; local CLI only)"),
     }
 }
 
@@ -803,5 +908,73 @@ mod pair_option_tests {
                      &["--key", "ABC", "--key", "DEF"][..]] {
             assert!(parse_pair_options(args).is_err(), "{args:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    fn fixture(tag: &str) -> PathBuf {
+        let d = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target").join("debug-fixtures").join(tag);
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join(".reposuite")).unwrap();
+        d
+    }
+
+    fn write_cfg(home: &Path, body: &str) {
+        fs::write(home.join(".reposuite/config.json"), body).unwrap();
+    }
+
+    #[test]
+    fn gate_matrix() {
+        let h = fixture("gate");
+        assert_eq!(debug_config(&h).gate, DebugGate::Missing);
+        write_cfg(&h, "{\"debug_mode\": true}");
+        assert_eq!(debug_config(&h).gate, DebugGate::Enabled);
+        for (body, want) in [
+            ("{\"debug_mode\": false}", DebugGate::NotBool),
+            ("{\"debug_mode\": \"true\"}", DebugGate::NotBool),
+            ("{\"debug_mode\": 1}", DebugGate::NotBool),
+            ("{\"other\": 1}", DebugGate::NotBool),
+            ("not json {", DebugGate::Malformed),
+            ("[1,2]", DebugGate::NotObject),
+            ("\"x\"", DebugGate::NotObject),
+        ] {
+            write_cfg(&h, body);
+            assert_eq!(debug_config(&h).gate, want, "body={body}");
+        }
+    }
+
+    #[test]
+    fn execute_gated_and_actions() {
+        let h = fixture("exec");
+        let p = paths();
+        let off = debug_config(&h);
+        assert!(debug_execute(&p, &off, Some("paths")).is_err());
+        write_cfg(&h, "{\"debug_mode\": true, \"secret\": \"s3cr3t\"}");
+        let on = debug_config(&h);
+        let v = debug_execute(&p, &on, Some("paths")).unwrap();
+        assert_eq!(v["action"], "paths");
+        let c = debug_execute(&p, &on, Some("config")).unwrap();
+        assert_eq!(c["enabled"], true);
+        assert!(!serde_json::to_string(&c).unwrap().contains("s3cr3t"));
+        assert!(debug_execute(&p, &on, Some("bogus")).is_err());
+        assert!(debug_execute(&p, &on, None).is_err());
+    }
+
+    #[test]
+    fn render_text_and_json() {
+        let h = fixture("render");
+        write_cfg(&h, "{\"debug_mode\": true}");
+        let p = paths();
+        let on = debug_config(&h);
+        let v = debug_execute(&p, &on, Some("paths")).unwrap();
+        let t = render_debug(&v, false);
+        assert!(t.contains("root=") && t.contains("socket="));
+        let j = render_debug(&v, true);
+        let back: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(back["action"], "paths");
     }
 }
