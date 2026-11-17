@@ -23,8 +23,6 @@ env:
   DISTRIBUTION_SHA: ${{ vars.RELEASE_DISTRIBUTION_SHA }}
   GATEWAY_SHA: ${{ vars.RELEASE_GATEWAY_SHA }}
   RELAY_SHA: ${{ vars.RELEASE_RELAY_SHA }}
-  # All job temp/cache resolves under the runner-owned temp dir, never /tmp.
-  TMPDIR: ${{ runner.temp }}
   REPOSUITE_CLI: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/reposuite
 jobs:
   verify:
@@ -38,6 +36,9 @@ jobs:
       distribution_sha: ${{ steps.pins.outputs.distribution_sha }}
       gateway_sha: ${{ steps.pins.outputs.gateway_sha }}
       relay_sha: ${{ steps.pins.outputs.relay_sha }}
+    env:
+      # Job temp/cache resolves under the runner-owned temp dir, never /tmp.
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -214,6 +215,8 @@ jobs:
       GATEWAY_SHA: ${{ needs.verify.outputs.gateway_sha }}
       RELAY_SHA: ${{ needs.verify.outputs.relay_sha }}
       NPM_TAG: ${{ inputs.tag }}
+      # Job temp/cache resolves under the runner-owned temp dir, never /tmp.
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
