@@ -36,10 +36,14 @@ jobs:
       distribution_sha: ${{ steps.pins.outputs.distribution_sha }}
       gateway_sha: ${{ steps.pins.outputs.gateway_sha }}
       relay_sha: ${{ steps.pins.outputs.relay_sha }}
-    env:
-      # Job temp/cache resolves under the runner-owned temp dir, never /tmp.
-      TMPDIR: ${{ runner.temp }}
     steps:
+      - name: pin job temp to runner.temp
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || { echo "RUNNER_TEMP unset or not a directory" >&2; exit 1; }
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DISTRIBUTION_SHA }}
@@ -215,9 +219,14 @@ jobs:
       GATEWAY_SHA: ${{ needs.verify.outputs.gateway_sha }}
       RELAY_SHA: ${{ needs.verify.outputs.relay_sha }}
       NPM_TAG: ${{ inputs.tag }}
-      # Job temp/cache resolves under the runner-owned temp dir, never /tmp.
-      TMPDIR: ${{ runner.temp }}
     steps:
+      - name: pin job temp to runner.temp
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || { echo "RUNNER_TEMP unset or not a directory" >&2; exit 1; }
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.verify.outputs.distribution_sha }}
