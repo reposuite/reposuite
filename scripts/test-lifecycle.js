@@ -15,6 +15,20 @@ const { execFileSync, spawnSync, spawn } = require('child_process');
 
 // canonical CLI = the Rust binary (REPOSUITE_CLI override for CI layouts)
 const CLI = process.env.REPOSUITE_CLI || path.join(__dirname, '..', 'target', 'release', 'reposuite');
+// Source-level tests must never exercise a stale binary: when using the
+// repo-local CLI, build first — same convention as the Makefile `test`
+// target. Incremental cargo makes this cheap. An external REPOSUITE_CLI is
+// the caller's responsibility (CI may pin a prebuilt artifact). A failed
+// build stops here, before any scenario runs.
+if (!process.env.REPOSUITE_CLI) {
+  const b = spawnSync('cargo', ['build', '--release'],
+    { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 600000 });
+  if (b.error || b.status !== 0) {
+    console.error('lifecycle: cargo build --release failed — refusing to run scenarios against a possibly-stale binary');
+    if (b.stderr) console.error(b.stderr.trim().split('\n').slice(-8).join('\n'));
+    process.exit(2);
+  }
+}
 if (!require('fs').existsSync(CLI)) {
   console.error('lifecycle: Rust CLI not built at ' + CLI + ' — run: cargo build --release');
   process.exit(2);
