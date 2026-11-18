@@ -58,12 +58,6 @@ def fail(msg):
     raise VerifyError(msg)
 
 
-def sha256_file(p):
-    h = hashlib.sha256()
-    h.update(p.read_bytes())
-    return h.hexdigest()
-
-
 def hex40(name, value):
     if (
         not isinstance(value, str)
@@ -74,9 +68,9 @@ def hex40(name, value):
     return value
 
 
-def git_head():
+def git_head(root):
     r = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=os.getcwd()
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=root
     )
     if r.returncode != 0:
         fail(f"git rev-parse HEAD failed: {r.stderr.strip()}")
@@ -147,7 +141,7 @@ def verify(root):
         fail(f"manifest.version {version!r} != package.json {root_version!r}")
     ok(f"version {version}")
 
-    head = git_head()
+    head = git_head(root)
     gw = hex40("env GATEWAY_SHA", os.environ.get("GATEWAY_SHA"))
     ry = hex40("env RELAY_SHA", os.environ.get("RELAY_SHA"))
     pins = manifest.get("pins") or {}
@@ -188,10 +182,12 @@ def verify(root):
     if set(sums) != {entry_tgz.name, plat_tgz.name}:
         fail(f"SHA256SUMS names {sorted(sums)} != expected tarballs")
     blob = {}
+    sha256_of = {}
     for t in (entry_tgz, plat_tgz):
         data = t.read_bytes()
         blob[t.name] = data
         actual = hashlib.sha256(data).hexdigest()
+        sha256_of[t.name] = actual
         if sums[t.name] != actual:
             fail(f"{t.name}: sha256 mismatch (manifest {sums[t.name][:12]}… != actual {actual[:12]}…)")
         ok(f"{t.name} sha256 {actual}")
@@ -278,7 +274,7 @@ def verify(root):
     def _ident(tgz_name, pkg_name):
         data = blob[tgz_name]
         return {"package": pkg_name, "name": tgz_name,
-                "sha256": hashlib.sha256(data).hexdigest(),
+                "sha256": sha256_of[tgz_name],
                 "integrity": "sha512-" + base64.b64encode(
                     hashlib.sha512(data).digest()).decode()}
 

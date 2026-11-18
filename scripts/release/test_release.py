@@ -431,6 +431,55 @@ def main():
             else:
                 os.environ[k] = v
 
+    # ---------- verify(root) resolves git HEAD in root, not cwd ----------
+    root_a = sandbox(tmp / "cwd-a")
+    root_b = sandbox(tmp / "cwd-b")
+    # fixture commits can collide (same tree/message/second) — force B
+    # to a distinct HEAD so cwd-vs-root resolution is observable
+    (root_b / "marker-b.txt").write_text("b\n")
+    git(root_b, "add", "-A")
+    git(root_b, "-c", "user.email=t@t", "-c", "user.name=t",
+        "commit", "-qm", "distinct-b")
+    # B's manifest + in-tarball PINS.txt must track B's NEW head
+    new_head = git(root_b, "rev-parse", "HEAD")
+    art_b = root_b / "release-artifacts"
+    mp0 = art_b / "manifest.json"
+    m0 = json.loads(mp0.read_text())
+    m0["pins"]["distribution"] = new_head
+    mp0.write_text(json.dumps(m0))
+    pt_b = art_b / f"reposuite-linux-x64-{VERSION}.tgz"
+    et_b = art_b / f"reposuite-{VERSION}.tgz"
+    pins_b = pins_text("2026-10-27T00:00:00Z").replace(
+        DIST.encode(), new_head.encode())
+    make_tgz(pt_b, {
+        "package/bin/reposuite": (elf_stub(), 0o755),
+        "package/bin/reposuite-gateway": (elf_stub(), 0o755),
+        "package/bin/reposuite-relay": (elf_stub(), 0o755),
+        "package/bin/PINS.txt": (pins_b, 0o644),
+        "package/package.json": (json.dumps(plat_pkg()).encode(), 0o644)})
+    (art_b / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256(t.read_bytes()).hexdigest()}  {t.name}\n"
+        for t in (et_b, pt_b)))
+    assert git(root_a, "rev-parse", "HEAD") != git(root_b, "rev-parse", "HEAD")
+    os.environ["GATEWAY_SHA"], os.environ["RELAY_SHA"] = GW, RY
+    try:
+        os.chdir(root_a)          # cwd is repo A; verify repo B
+        res_b = VA.verify(Path(root_b))
+        chk("verify(root): HEAD resolved in root not process cwd",
+            res_b["version"] == VERSION, json.dumps(res_b)[:120])
+        # bad distribution pin in B's manifest -> refusal even from A cwd
+        mp = root_b / "release-artifacts" / "manifest.json"
+        m = json.loads(mp.read_text())
+        m["pins"]["distribution"] = "0" * 40
+        mp.write_text(json.dumps(m))
+        try:
+            VA.verify(Path(root_b))
+            chk("verify(root): bad pin refuses regardless of cwd", False)
+        except VA.VerifyError:
+            chk("verify(root): bad pin refuses regardless of cwd", True)
+    finally:
+        os.chdir(oldcwd)
+
     print(f"\n{'FAIL' if FAIL else 'test-release: OK'}  pass={PASS} fail={FAIL}")
     shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(1 if FAIL else 0)
