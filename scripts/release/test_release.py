@@ -12,6 +12,7 @@ exactness/order/tag rules/registry preflight/PARTIAL_PUBLISH via an npm
 PATH shim.
 """
 
+import base64
 import hashlib
 import io
 import json
@@ -386,6 +387,49 @@ def main():
     chk("publish: entry failure => PARTIAL_PUBLISH", r.returncode != 0 and "PARTIAL_PUBLISH" in r.stderr + r.stdout,
         r.stderr + r.stdout)
     chk("publish: platform still attempted first", log.count("npm publish") == 2, log)
+
+    # ---------- importable npm identity (verify() result) ----------
+    sys.path.insert(0, str(SCRIPTS))
+    import verify_artifacts as VA
+
+    def _ident_expect(tgz_path, pkg):
+        data = Path(tgz_path).read_bytes()
+        return {"package": pkg, "name": Path(tgz_path).name,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "integrity": "sha512-" + base64.b64encode(
+                    hashlib.sha512(data).digest()).decode()}
+
+    idroot = sandbox(tmp / "ident")
+    oldcwd = os.getcwd()
+    oldenv = {k: os.environ.get(k) for k in ("GATEWAY_SHA", "RELAY_SHA")}
+    os.environ["GATEWAY_SHA"], os.environ["RELAY_SHA"] = GW, RY
+    try:
+        os.chdir(idroot)
+        res = VA.verify(Path(idroot))
+        et = idroot / "release-artifacts" / f"reposuite-{VERSION}.tgz"
+        pt = idroot / "release-artifacts" / f"reposuite-linux-x64-{VERSION}.tgz"
+        want = {"version": VERSION, "tarballs": [
+            _ident_expect(et, "reposuite"),
+            _ident_expect(pt, "@reposuite/linux-x64")]}
+        chk("verify(): returns exact version + two ordered identities",
+            res == want, json.dumps(res)[:200])
+
+        badroot = sandbox(tmp / "ident-bad")
+        (badroot / "release-artifacts" / pt.name).write_bytes(
+            pt.read_bytes() + b"x")
+        os.chdir(badroot)
+        try:
+            VA.verify(Path(badroot))
+            chk("verify(): tampered tarball raises VerifyError", False)
+        except VA.VerifyError:
+            chk("verify(): tampered tarball raises VerifyError", True)
+    finally:
+        os.chdir(oldcwd)
+        for k, v in oldenv.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     print(f"\n{'FAIL' if FAIL else 'test-release: OK'}  pass={PASS} fail={FAIL}")
     shutil.rmtree(tmp, ignore_errors=True)

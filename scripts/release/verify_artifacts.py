@@ -29,7 +29,9 @@ Contract (fail-closed on any violation):
     wrapper integrity)
 """
 
+import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -42,6 +44,10 @@ from pathlib import Path
 CHECKS = 0
 
 
+class VerifyError(Exception):
+    """Internal fail-closed signal; main() converts to exit 1."""
+
+
 def ok(msg):
     global CHECKS
     CHECKS += 1
@@ -49,8 +55,7 @@ def ok(msg):
 
 
 def fail(msg):
-    print(f"verify: FAIL {msg}", file=sys.stderr)
-    sys.exit(1)
+    raise VerifyError(msg)
 
 
 def sha256_file(p):
@@ -78,27 +83,28 @@ def git_head():
     return hex40("git HEAD", r.stdout.strip())
 
 
-def archive_members(tgz, expected):
-    """Return {name: TarInfo-with-bytes} requiring exactly `expected` regular files."""
+def archive_members(tgz_name, data, expected):
+    """Return {name: TarInfo-with-bytes} requiring exactly `expected`
+    regular files, parsed from the SAME captured bytes used for hashing."""
     found = {}
-    with tarfile.open(tgz, "r:gz") as tf:
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
         for m in tf:
             name = m.name
             if name in (".", "./") or name.endswith("/"):
-                fail(f"{tgz.name}: directory entry {name!r} not allowed")
+                fail(f"{tgz_name}: directory entry {name!r} not allowed")
             if ".." in name.split("/") or name.startswith("/"):
-                fail(f"{tgz.name}: traversal member {name!r}")
+                fail(f"{tgz_name}: traversal member {name!r}")
             if not m.isreg():
-                fail(f"{tgz.name}: non-regular member {name!r} (type {m.type!r})")
+                fail(f"{tgz_name}: non-regular member {name!r} (type {m.type!r})")
             if name in found:
-                fail(f"{tgz.name}: duplicate member {name!r}")
+                fail(f"{tgz_name}: duplicate member {name!r}")
             if name not in expected:
-                fail(f"{tgz.name}: unexpected member {name!r}")
+                fail(f"{tgz_name}: unexpected member {name!r}")
             f = tf.extractfile(m)
             found[name] = (m, f.read() if f else b"")
     missing = expected - found.keys()
     if missing:
-        fail(f"{tgz.name}: missing members {sorted(missing)}")
+        fail(f"{tgz_name}: missing members {sorted(missing)}")
     return found
 
 
@@ -119,8 +125,10 @@ def elf_x86_64(name, data):
         fail(f"{name}: not an x86_64 ELF")
 
 
-def main():
-    root = Path.cwd()
+def verify(root):
+    """Run the full artifact gate; return the npm tarball identity doc
+    on success, raise VerifyError on any violation."""
+    root = Path(root)
     art = root / "release-artifacts"
     if not art.is_dir():
         fail(f"release-artifacts/ not found under {root}")
@@ -179,15 +187,18 @@ def main():
         sums[name] = digest
     if set(sums) != {entry_tgz.name, plat_tgz.name}:
         fail(f"SHA256SUMS names {sorted(sums)} != expected tarballs")
+    blob = {}
     for t in (entry_tgz, plat_tgz):
-        actual = sha256_file(t)
+        data = t.read_bytes()
+        blob[t.name] = data
+        actual = hashlib.sha256(data).hexdigest()
         if sums[t.name] != actual:
             fail(f"{t.name}: sha256 mismatch (manifest {sums[t.name][:12]}… != actual {actual[:12]}…)")
         ok(f"{t.name} sha256 {actual}")
 
     # ---- entry archive ------------------------------------------------------
     entry = archive_members(
-        entry_tgz,
+        entry_tgz.name, blob[entry_tgz.name],
         {
             "package/bin/reposuite.js",
             "package/package.json",
@@ -205,7 +216,7 @@ def main():
 
     # ---- platform archive ---------------------------------------------------
     plat = archive_members(
-        plat_tgz,
+        plat_tgz.name, blob[plat_tgz.name],
         {
             "package/bin/reposuite",
             "package/bin/reposuite-gateway",
@@ -264,6 +275,24 @@ def main():
         fail("entry launcher bytes != bin/reposuite.js at checkout")
     ok("launcher byte-identical to bin/reposuite.js")
 
+    def _ident(tgz_name, pkg_name):
+        data = blob[tgz_name]
+        return {"package": pkg_name, "name": tgz_name,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "integrity": "sha512-" + base64.b64encode(
+                    hashlib.sha512(data).digest()).decode()}
+
+    return {"version": version,
+            "tarballs": [_ident(entry_tgz.name, epkg["name"]),
+                         _ident(plat_tgz.name, ppkg["name"])]}
+
+
+def main():
+    try:
+        verify(Path.cwd())
+    except VerifyError as e:
+        print(f"verify: FAIL {e}", file=sys.stderr)
+        sys.exit(1)
     print(f"verify: artifacts clean — {CHECKS} checks passed")
 
 
