@@ -170,7 +170,7 @@ fn cloud_status(p: &Paths) -> Option<serde_json::Value> {
 }
 fn cloud_pair(p: &Paths, invite: &str) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "invite": invite }).to_string();
-    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair", Some(&body))
+    let (st, b) = http_unix(&p.socket, "POST", "/v1/cloud/pair-invite", Some(&body))
         .ok_or("gateway socket unavailable")?;
     let v: serde_json::Value = serde_json::from_str(&b).unwrap_or(serde_json::Value::Null);
     if st == 200 { Ok(v) } else {
