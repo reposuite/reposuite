@@ -12,10 +12,9 @@ on:
         options: [beta, latest]
         default: beta
       release_tag:
-        description: "Optional git tag whose committed release-pins.json must agree with RELEASE_*_SHA vars (pre-build agreement gate)"
+        description: "Git tag whose committed release-pins.json must agree with RELEASE_*_SHA vars (required pre-build agreement gate)"
         type: string
-        required: false
-        default: ""
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -41,6 +40,7 @@ jobs:
       distribution_sha: ${{ steps.pins.outputs.distribution_sha }}
       gateway_sha: ${{ steps.pins.outputs.gateway_sha }}
       relay_sha: ${{ steps.pins.outputs.relay_sha }}
+      agreement_status: ${{ steps.pin_agreement.outputs.status }}
     steps:
       - name: pin job temp to runner.temp
         env:
@@ -66,19 +66,26 @@ jobs:
           echo "distribution_sha=$DISTRIBUTION_SHA" >> "$GITHUB_OUTPUT"
           echo "gateway_sha=$GATEWAY_SHA" >> "$GITHUB_OUTPUT"
           echo "relay_sha=$RELAY_SHA" >> "$GITHUB_OUTPUT"
-      - name: tagged pin agreement (when release_tag supplied)
-        if: inputs.release_tag != ''
+      - name: tagged pin agreement (required gate)
+        id: pin_agreement
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           # tag object must exist in this checkout; fetch exactly it
           git fetch --no-tags --depth=1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
-          python3 scripts/release/check_pin_agreement.py \
+          set +e
+          OUT=$(python3 scripts/release/check_pin_agreement.py \
             --tag "$RELEASE_TAG" --repo "$GITHUB_WORKSPACE" \
             --expect-distribution-sha "$DISTRIBUTION_SHA" \
             --expect-gateway-sha "$GATEWAY_SHA" \
-            --expect-relay-sha "$RELAY_SHA"
+            --expect-relay-sha "$RELAY_SHA" 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$OUT"
+          STATUS=$(printf '%s' "$OUT" | python3 -c "import json,sys;print(json.loads(sys.stdin.read()).get('status','error'))" 2>/dev/null || echo error)
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          exit $rc
       - uses: actions/setup-go@v5
         with: { go-version: '1.27.3' }
       - uses: dtolnay/rust-toolchain@stable
@@ -224,7 +231,7 @@ jobs:
             release-artifacts/BUILD_ENVIRONMENT.txt
   publish:
     needs: verify
-    if: inputs.publish == true
+    if: inputs.publish == true && needs.verify.outputs.agreement_status == 'agreed'
     runs-on: ubuntu-22.04
     # Human Owner approval gate — publication cannot start without it.
     environment: release

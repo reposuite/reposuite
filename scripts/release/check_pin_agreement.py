@@ -19,6 +19,8 @@ def main():
     ap.add_argument("--expect-distribution-sha",required=True)
     ap.add_argument("--expect-gateway-sha",required=True)
     ap.add_argument("--expect-relay-sha",required=True)
+    ap.add_argument("--expect-control-sha",default=None,
+        help="optional: assert resolved control_sha equals this 40-hex")
     a=ap.parse_args()
     here=os.path.dirname(os.path.abspath(__file__))
     rt=os.path.join(here,"resolve_tag.py")
@@ -34,6 +36,8 @@ def main():
     exp={"distribution_sha":a.expect_distribution_sha,
          "gateway_sha":a.expect_gateway_sha,
          "relay_sha":a.expect_relay_sha}
+    if a.expect_control_sha is not None:
+        exp["control_sha"]=a.expect_control_sha
     diffs={k:{"resolved":res.get(k),"expected":v}
            for k,v in exp.items() if res.get(k)!=v}
     if diffs:

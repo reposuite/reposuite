@@ -62,5 +62,31 @@ class TestAgreement(unittest.TestCase):
             p=self.run_chk(d,"v9.9.9-test",sha,GW,RL)
             self.assertEqual(p.returncode,2)
 
+class TestControlPin(unittest.TestCase):
+    def run_chk(self,repo,tag,dist,gw,rl,ctrl=None):
+        cmd=[sys.executable,CHK,"--tag",tag,"--repo",repo,
+            "--expect-distribution-sha",dist,"--expect-gateway-sha",gw,
+            "--expect-relay-sha",rl]
+        if ctrl is not None: cmd+=["--expect-control-sha",ctrl]
+        return subprocess.run(cmd,capture_output=True,text=True)
+    def test_control_pin_accepted_when_matching(self):
+        with tempfile.TemporaryDirectory() as d:
+            pins=dict(PINS); pins["control_sha"]="e"*40
+            sha=make_repo(d,pins)
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"e"*40)
+            self.assertEqual(p.returncode,0,p.stdout)
+            self.assertEqual(json.loads(p.stdout)["control_sha"],"e"*40)
+    def test_control_pin_refused_on_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            pins=dict(PINS); pins["control_sha"]="e"*40
+            sha=make_repo(d,pins)
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"f"*40)
+            self.assertEqual(p.returncode,3,p.stdout)
+    def test_control_pin_refused_when_resolved_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            sha=make_repo(d,PINS)  # control_sha null
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"e"*40)
+            self.assertEqual(p.returncode,3,p.stdout)
+
 if __name__=="__main__":
     unittest.main()
