@@ -32,6 +32,11 @@ class TestWorkflowGate(unittest.TestCase):
         self.assertIn("agreed",cond)
     def test_verify_outputs_agreement(self):
         self.assertIn("agreement_status",self.verify_job["outputs"])
+    def test_control_expectation_wired(self):
+        txt=open(WF).read()
+        self.assertIn("RELEASE_CONTROL_SHA",txt)
+        self.assertIn("--expect-control-sha",txt)
+        self.assertIn("null)",txt)  # literal-null policy branch
     def test_no_omission_path(self):
         # no step may gate agreement behind a possibly-empty input
         for s in self.verify_job["steps"]:

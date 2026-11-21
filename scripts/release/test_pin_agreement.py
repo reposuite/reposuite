@@ -88,5 +88,38 @@ class TestControlPin(unittest.TestCase):
             p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"e"*40)
             self.assertEqual(p.returncode,3,p.stdout)
 
+class TestNullPolicy(unittest.TestCase):
+    """Actual-invocation tests: --expect-control-sha null vs omitted vs hex."""
+    def run_chk(self,repo,tag,dist,gw,rl,ctrl_marker):
+        cmd=[sys.executable,CHK,"--tag",tag,"--repo",repo,
+            "--expect-distribution-sha",dist,"--expect-gateway-sha",gw,
+            "--expect-relay-sha",rl]
+        # ctrl_marker: 'OMIT' | 'null' | hex
+        if ctrl_marker!="OMIT": cmd+=["--expect-control-sha",ctrl_marker]
+        return subprocess.run(cmd,capture_output=True,text=True)
+    def test_null_policy_accepts_null_control(self):
+        with tempfile.TemporaryDirectory() as d:
+            sha=make_repo(d,PINS)  # control_sha null
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"null")
+            self.assertEqual(p.returncode,0,p.stdout)
+            self.assertEqual(json.loads(p.stdout)["status"],"agreed")
+    def test_null_policy_refuses_set_control(self):
+        with tempfile.TemporaryDirectory() as d:
+            pins=dict(PINS); pins["control_sha"]="e"*40
+            sha=make_repo(d,pins)
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"null")
+            self.assertEqual(p.returncode,3,p.stdout)
+            self.assertIn("control_sha",json.loads(p.stdout)["diffs"])
+    def test_omitted_control_still_agrees_with_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            sha=make_repo(d,PINS)
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"OMIT")
+            self.assertEqual(p.returncode,0,p.stdout)
+    def test_invalid_control_value_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            sha=make_repo(d,PINS)
+            p=self.run_chk(d,"v9.9.9-test",sha,GW,RL,"nothex!!")
+            self.assertEqual(p.returncode,2,p.stdout)
+
 if __name__=="__main__":
     unittest.main()

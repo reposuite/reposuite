@@ -70,16 +70,30 @@ jobs:
         id: pin_agreement
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_CONTROL_SHA: ${{ vars.RELEASE_CONTROL_SHA }}
         run: |
           set -euo pipefail
           # tag object must exist in this checkout; fetch exactly it
           git fetch --no-tags --depth=1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          # Control expectation policy: unset/empty = omitted (no assert);
+          # literal 'null' = expect resolved control_sha null;
+          # 40-hex = expect that value; anything else = invalid -> fail.
+          CTRL_ARGS=()
+          if [ -n "${RELEASE_CONTROL_SHA:-}" ]; then
+            case "$RELEASE_CONTROL_SHA" in
+              null) CTRL_ARGS+=(--expect-control-sha null) ;;
+              *)    [[ "$RELEASE_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]] \
+                      || { echo "invalid RELEASE_CONTROL_SHA policy" >&2; exit 2; }
+                    CTRL_ARGS+=(--expect-control-sha "$RELEASE_CONTROL_SHA") ;;
+            esac
+          fi
           set +e
           OUT=$(python3 scripts/release/check_pin_agreement.py \
             --tag "$RELEASE_TAG" --repo "$GITHUB_WORKSPACE" \
             --expect-distribution-sha "$DISTRIBUTION_SHA" \
             --expect-gateway-sha "$GATEWAY_SHA" \
-            --expect-relay-sha "$RELAY_SHA" 2>&1)
+            --expect-relay-sha "$RELAY_SHA" \
+            "${CTRL_ARGS[@]}" 2>&1)
           rc=$?
           set -e
           printf '%s\n' "$OUT"
