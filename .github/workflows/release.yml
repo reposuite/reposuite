@@ -75,18 +75,19 @@ jobs:
           set -euo pipefail
           # tag object must exist in this checkout; fetch exactly it
           git fetch --no-tags --depth=1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
-          # Control expectation policy: unset/empty = omitted (no assert);
-          # literal 'null' = expect resolved control_sha null;
-          # 40-hex = expect that value; anything else = invalid -> fail.
-          CTRL_ARGS=()
-          if [ -n "${RELEASE_CONTROL_SHA:-}" ]; then
-            case "$RELEASE_CONTROL_SHA" in
-              null) CTRL_ARGS+=(--expect-control-sha null) ;;
-              *)    [[ "$RELEASE_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]] \
-                      || { echo "invalid RELEASE_CONTROL_SHA policy" >&2; exit 2; }
-                    CTRL_ARGS+=(--expect-control-sha "$RELEASE_CONTROL_SHA") ;;
-            esac
+          # Control expectation policy (MANDATORY, explicit nullable):
+          # missing/empty -> REFUSE; literal 'null' -> expect resolved
+          # control_sha null; 40-hex -> expect that value; else invalid.
+          if [ -z "${RELEASE_CONTROL_SHA+x}" ] || [ -z "$RELEASE_CONTROL_SHA" ]; then
+            echo "RELEASE_CONTROL_SHA missing/empty — explicit control policy required" >&2
+            exit 2
           fi
+          case "$RELEASE_CONTROL_SHA" in
+            null) CTRL_ARGS=(--expect-control-sha null) ;;
+            *)    [[ "$RELEASE_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]] \
+                    || { echo "invalid RELEASE_CONTROL_SHA policy" >&2; exit 2; }
+                  CTRL_ARGS=(--expect-control-sha "$RELEASE_CONTROL_SHA") ;;
+          esac
           set +e
           OUT=$(python3 scripts/release/check_pin_agreement.py \
             --tag "$RELEASE_TAG" --repo "$GITHUB_WORKSPACE" \
