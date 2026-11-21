@@ -2,7 +2,7 @@
 # Build the native binaries into packages/linux-x64/bin from pinned trees.
 set -euo pipefail
 : "${GATEWAY_SHA:?}" "${RELAY_SHA:?}"
-GW_GO=go1.27.3
+GW_GO=go1.27.4
 RELAY_GO=go1.27.1
 for toolchain in "$GW_GO" "$RELAY_GO"; do
   [ "$(GOTOOLCHAIN="$toolchain" go env GOVERSION)" = "$toolchain" ] || {

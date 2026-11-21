@@ -102,7 +102,7 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           exit $rc
       - uses: actions/setup-go@v5
-        with: { go-version: '1.27.3' }
+        with: { go-version: '1.27.4' }
       - uses: dtolnay/rust-toolchain@stable
         with: { toolchain: '1.93.1', targets: 'x86_64-unknown-linux-musl' }
       - uses: actions/setup-node@v4
@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           npm install -g npm@11.21.1
-          [ "$(GOTOOLCHAIN=go1.27.3 go env GOVERSION)" = go1.27.3 ] || { echo "gateway Go mismatch" >&2; exit 1; }
+          [ "$(GOTOOLCHAIN=go1.27.4 go env GOVERSION)" = go1.27.3 ] || { echo "gateway Go mismatch" >&2; exit 1; }
           [ "$(GOTOOLCHAIN=go1.27.1 go env GOVERSION)" = go1.27.1 ] || { echo "relay Go mismatch" >&2; exit 1; }
           rustc --version | grep -q '^rustc 1\.93\.1 ' || { rustc --version >&2; exit 1; }
           cargo --version | grep -q '^cargo 1\.93\.1 ' || { cargo --version >&2; exit 1; }
@@ -183,8 +183,8 @@ jobs:
         working-directory: ../reposuite-gateway
         run: |
           set -euo pipefail
-          GOTOOLCHAIN=go1.27.3 go test ./...
-          GOTOOLCHAIN=go1.27.3 go test -race -count=1 ./...
+          GOTOOLCHAIN=go1.27.4 go test ./...
+          GOTOOLCHAIN=go1.27.4 go test -race -count=1 ./...
       - name: relay test suite
         working-directory: ../reposuite-relay
         run: |
