@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -220,6 +221,20 @@ def run_publish(root, env_extra):
 
 
 def main():
+    # The release workflow and the builder must agree on the Gateway Go
+    # toolchain both before building and when checking the built executable.
+    build = (SCRIPTS / "build.sh").read_text()
+    workflow = (REPO / ".github" / "workflows" / "release.yml").read_text()
+    match = re.search(r"^GW_GO=(go[0-9.]+)$", build, re.MULTILINE)
+    expected = match.group(1) if match else ""
+    chk("gateway builder toolchain present", bool(expected))
+    if expected:
+        setup = "go-version: '" + expected.removeprefix("go") + "'"
+        preflight = '[ "$(GOTOOLCHAIN=' + expected + ' go env GOVERSION)" = ' + expected + ' ]'
+        proof = "go version \"$B/reposuite-gateway\" | grep -q ' " + expected.replace(".", "\\.") + "$'"
+        chk("workflow setup uses gateway builder toolchain", setup in workflow)
+        chk("workflow gateway preflight matches builder", preflight in workflow)
+        chk("workflow gateway binary proof matches builder", proof in workflow)
     tmp = Path(tempfile.mkdtemp(prefix="reltst-"))
     os.chdir(tmp)
 
