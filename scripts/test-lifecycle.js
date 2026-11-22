@@ -201,6 +201,7 @@ esac
     fs.mkdirSync(vOld, { recursive: true });
     for (const b of ['reposuite-gateway', 'reposuite-relay']) fs.writeFileSync(path.join(vOld, b), 'old', { mode: 0o755 });
     pkgBin(t);
+    fs.writeFileSync(path.join(paths.data, 'reposuite', 'activation.json'), JSON.stringify({current:'0.0.2',previous:'0.0.1'}));
     const r = run(t, { ...env, REPOSUITE_FAULT_INJECT: 'start' }, ['rollback']);
     chk('rollback injected failure exits nonzero', r.status !== 0);
     chk('rollback failure keeps current version', path.basename(fs.readlinkSync(paths.current)) === '0.0.2');
@@ -296,7 +297,7 @@ esac
     fs.mkdirSync(staged, { recursive: true });
     fs.writeFileSync(path.join(staged, 'reposuite-gateway'), 'do not replace');
     const r = run(t, env, ['update-apply']);
-    chk('existing version refuses overwrite', r.status !== 0 && /without overwriting/.test(r.stderr + r.stdout));
+    chk('existing version refuses overwrite', r.status !== 0 && /incomplete or differs/.test(r.stderr + r.stdout));
     chk('existing version remains intact', fs.readFileSync(path.join(staged, 'reposuite-gateway'), 'utf8') === 'do not replace');
     chk('existing version leaves current unchanged', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
     fs.rmSync(t, { recursive: true, force: true });
@@ -385,6 +386,7 @@ esac
       const old = path.join(paths.data, 'reposuite', 'versions', '0.0.1', 'bin');
       fs.mkdirSync(old, { recursive: true });
       for (const b of ['reposuite-gateway', 'reposuite-relay']) fs.writeFileSync(path.join(old, b), 'old', { mode: 0o755 });
+      fs.writeFileSync(path.join(paths.data, 'reposuite', 'activation.json'), JSON.stringify({current:'0.0.2',previous:'0.0.1'}));
     }
     seedRelayHealth(paths, port);
     fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });

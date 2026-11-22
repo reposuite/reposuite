@@ -80,13 +80,11 @@ fn version_conflict() -> String {
 }
 // Build the complete version outside versions/ and publish it atomically.
 // RENAME_NOREPLACE prevents clobbering even an uncooperative concurrent writer.
-fn install_pair(p: &Paths, source: &Path, reuse: bool) -> Result<PathBuf, String> {
+fn install_pair(p: &Paths, source: &Path) -> Result<PathBuf, String> {
     let dest = p.versions.join(VERSION);
     let bin = dest.join("bin");
     if fs::symlink_metadata(&dest).is_ok() {
-        return if reuse && same_pair(source, &bin) { Ok(bin) } else if reuse {
-            Err(version_conflict())
-        } else { Err(format!("cannot stage {VERSION} without overwriting an existing version")) };
+        return if same_pair(source, &bin) { Ok(bin) } else { Err(version_conflict()) };
     }
     fs::create_dir_all(&p.versions).map_err(|e| format!("create versions directory: {e}"))?;
     for dir in [&p.root, &p.versions] {
@@ -106,7 +104,7 @@ fn install_pair(p: &Paths, source: &Path, reuse: bool) -> Result<PathBuf, String
         let to = std::ffi::CString::new(dest.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
         if unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) } != 0 {
             let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::EEXIST) && reuse && same_pair(source, &bin) { return Ok(()); }
+            if e.raw_os_error() == Some(libc::EEXIST) && same_pair(source, &bin) { return Ok(()); }
             return Err(if e.raw_os_error() == Some(libc::EEXIST) { version_conflict() } else { format!("install staged version: {e}") });
         }
         Ok(())
@@ -273,17 +271,22 @@ fn running_sessions(p: &Paths) -> i64 {
     }
 }
 
-fn write_units(p: &Paths, bin: &Path) {
-    let _ = fs::create_dir_all(&p.units);
+fn write_units(p: &Paths, bin: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(&p.units)?;
     let b = bin.display();
     let gw = format!("[Unit]\nDescription=RepoSuite Gateway (user)\n\n[Service]\nUMask=0077\nEnvironmentFile={}\nEnvironment=REPOSUITE_RSR_HOME={}\nEnvironment=REPOSUITE_GATEWAY_STATE={}\nExecStart={b}/reposuite-gateway serve --data-dir {} --socket {}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
         p.env_file.display(), p.relay.display(), p.gateway.display(),
         p.gateway.join("store").display(), p.socket.display());
     let rl = format!("[Unit]\nDescription=RepoSuite Relay (user)\nAfter=reposuite-gateway.service\n\n[Service]\nUMask=0077\nEnvironment=REPOSUITE_HOME={}\nExecStart={b}/reposuite-relay serve\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
         p.root.display());
-    let _ = fs::write(p.units.join("reposuite-gateway.service"), gw);
-    let _ = fs::write(p.units.join("reposuite-relay.service"), rl);
-
+    fs::write(p.units.join("reposuite-gateway.service"), gw)?;
+    // Exercise a failure after one successful write so rollback must restore
+    // the partial unit update as well as the environment and selection.
+    if env::var("REPOSUITE_FAULT_INJECT").as_deref() == Ok("unit-write-relay") {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected unit write failure"));
+    }
+    fs::write(p.units.join("reposuite-relay.service"), rl)?;
+    Ok(())
 }
 
 // Existing environment files are operator configuration.  Reusing them
@@ -443,7 +446,70 @@ fn health_wait(p: &Paths) -> bool {
     eprintln!("reposuite: health check timed out waiting for {last}");
     false
 }
-fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
+// This file records only activations that completed both service and health
+// checks. Directories are staging material, not proof of prior activation.
+#[derive(Debug)]
+struct ActivationHistory { current: String, previous: Option<String> }
+fn valid_version(v: &str) -> bool {
+    !v.is_empty() && v != "." && v != ".." && !v.contains('/') && !v.contains('\0')
+}
+fn load_history(p: &Paths) -> Result<Option<ActivationHistory>, String> {
+    let raw = match fs::read(p.root.join("activation.json")) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read activation history: {e}")),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| "invalid activation history; use supported recovery")?;
+    let current = v.get("current").and_then(|x| x.as_str()).filter(|x| valid_version(x))
+        .ok_or("invalid activation history; use supported recovery")?.to_string();
+    let previous = match v.get("previous") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if valid_version(s) && s != &current => Some(s.clone()),
+        _ => return Err("invalid activation history; use supported recovery".into()),
+    };
+    let selected = fs::canonicalize(&p.current).ok();
+    if current_version(p).as_deref() != Some(&current) || selected.is_none()
+        || selected != fs::canonicalize(p.versions.join(&current)).ok() {
+        return Err("activation history disagrees with current selection; use supported recovery for the interrupted activation".into());
+    }
+    Ok(Some(ActivationHistory { current, previous }))
+}
+fn save_history(p: &Paths, current: &str, previous: Option<&str>) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(&serde_json::json!({"current": current, "previous": previous}))?;
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let tmp = p.root.join(format!(".activation-{}-{nonce}", std::process::id()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        file.write_all(&bytes)?; file.sync_all()?;
+        fs::rename(&tmp, p.root.join("activation.json"))?;
+        // A directory sync persists the rename on filesystems that support it.
+        fs::File::open(&p.root)?.sync_all()
+    })();
+    let _ = fs::remove_file(&tmp);
+    result
+}
+// Adopt only a demonstrably live legacy selection. Unit state and local health
+// are not sufficient alone: each actual MainPID executable must be this pair.
+fn verified_legacy_current(p: &Paths) -> Option<String> {
+    let v = current_version(p)?;
+    if !valid_version(&v) || fs::canonicalize(&p.current).ok()? != fs::canonicalize(p.versions.join(&v)).ok()? || !health(p) { return None; }
+    for unit in OWNED_UNITS {
+        let name = unit.trim_end_matches(".service");
+        if !is_active(name) { return None; }
+        let out = Command::new("systemctl").args(["--user", "show", "--value", "-p", "MainPID", unit]).output().ok()?;
+        if !out.status.success() { return None; }
+        let pid = String::from_utf8(out.stdout).ok()?.trim().parse::<u32>().ok()?;
+        if pid == 0 { return None; }
+        let actual = fs::canonicalize(format!("/proc/{pid}/exe")).ok()?;
+        let expected = fs::canonicalize(p.versions.join(&v).join("bin").join(name)).ok()?;
+        if actual != expected { return None; }
+    }
+    Some(v)
+}
+fn apply_runtime(p: &Paths, version: &str, bin: &Path) -> bool {
+    if !systemd_ok() { ok("systemd --user unavailable — staged only; no activation recorded"); return false; }
+    let history = load_history(p).unwrap_or_else(|e| die(&e));
+    let verified = if history.is_none() { verified_legacy_current(p) } else { None };
     let new_env = planned_env(p).unwrap_or_else(|e| die(&e));
     let snap = snapshot(p);
     let fail = |msg: &str| -> ! {
@@ -459,8 +525,7 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
         let write = fs::write(&p.env_file, bytes).and_then(|_| fs::set_permissions(&p.env_file, fs::Permissions::from_mode(0o600)));
         if write.is_err() { fail("cannot write gateway environment"); }
     }
-    write_units(p, bin);
-    if !systemd_ok() { ok("systemd --user unavailable — staged only"); return; }
+    if let Err(e) = write_units(p, bin) { fail(&format!("cannot write user units: {e}")); }
     if !cmd_ok("systemctl", &["--user", "daemon-reload"]) { fail("daemon-reload failed"); }
     // Orphans from a previous partial install hold the socket/port and would
     // defeat the new units' bind — reap them before restart. Scoped strictly
@@ -475,11 +540,22 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
     // (start if not running) so the NEW binaries actually execute, then
     // verify both are active before health polling.
     let units = OWNED_UNITS.map(|u| u.trim_end_matches(".service"));
-    let _ = svc("enable", &units);
+    if !svc("enable", &units) { fail("service enable failed"); }
     if !svc("restart", &units) { fail("service start failed"); }
     for u in units { if !is_active(u) { fail("service did not become active"); } }
     if env::var("REPOSUITE_FAULT_INJECT").as_deref() == Ok("start") { fail("injected service failure"); }
     if !health_wait(p) { fail("health verification failed"); }
+    let last = history.as_ref().map(|h| h.current.as_str()).or(verified.as_deref());
+    let previous = if last == Some(version) { history.as_ref().and_then(|h| h.previous.as_deref()) } else { last };
+    if let Err(e) = save_history(p, version, previous) {
+        // The history rename may already have succeeded. Do not restore a
+        // different selection if the committed history names this version.
+        if load_history(p).ok().flatten().as_ref().map(|h| h.current.as_str()) == Some(version) {
+            die(&format!("activation history durability uncertain: {e}; use supported recovery"));
+        }
+        fail(&format!("cannot commit activation history: {e}"));
+    }
+    true
 }
 
 // ---- protected invite input: /dev/tty with echo disabled, always restored ----
@@ -545,14 +621,14 @@ fn cmd_setup(p: &Paths) {
             die("Relay state unknown — setup deferred (fail closed)");
         }
     }
-    let vdir = install_pair(p, &b, true).unwrap_or_else(|e| die(&e));
+    let vdir = install_pair(p, &b).unwrap_or_else(|e| die(&e));
     mkdir700(&p.root);
     migrate_legacy(p);
     mkdir700(&p.gateway); mkdir700(&p.relay);
     mkdir700(&p.gateway.join("store"));   // SQLite store root (strict whitelist)
     mkdir700(&p.gateway.join("cloud"));   // durable cloud identity/creds
     if let Some(parent) = p.socket.parent() { mkdir700(parent); }
-    apply_runtime(p, VERSION, &vdir);
+    if !apply_runtime(p, VERSION, &vdir) { return; }
     ok(&format!("setup complete (v{VERSION}) — run 'reposuite doctor', then 'reposuite pair'"));
 }
 
@@ -776,38 +852,33 @@ fn service_op(verb: &str) {
     cmd_status(&paths());
 }
 
-fn cmp_ver(a: &str, b: &str) -> std::cmp::Ordering {
-    let num = |s: &str| -> Vec<i64> { s.split(|c: char| c == '.' || c == '-' || c == '+')
-        .map(|p| p.parse::<i64>().unwrap_or(0)).collect() };
-    num(a).cmp(&num(b))
-}
-
 fn cmd_update_apply(p: &Paths) {
-    let cur = current_version(p);
     let s = running_sessions(p);
     if s != 0 {
         if s > 0 { die(&format!("{s} agent session(s) running — deferring activation")); }
         die("Relay state unknown — deferring activation (fail closed)");
     }
     let b = pkg_bin_dir().unwrap_or_else(|| die("new package carries no platform binaries"));
-    let vdir = install_pair(p, &b, false).unwrap_or_else(|e| die(&e));
-    apply_runtime(p, VERSION, &vdir);
-    ok(&format!("activated {VERSION}{}", cur.filter(|c| c != VERSION).map(|c| format!(" (previous {c} kept for rollback)")).unwrap_or_default()));
+    let vdir = install_pair(p, &b).unwrap_or_else(|e| die(&e));
+    if !apply_runtime(p, VERSION, &vdir) { return; }
+    let previous = load_history(p).unwrap_or_else(|e| die(&e)).and_then(|h| h.previous);
+    ok(&format!("activated {VERSION}{}", previous.map(|c| format!(" (previous {c} kept for rollback)")).unwrap_or_default()));
 }
 
 fn cmd_rollback(p: &Paths) {
     let cur = current_version(p);
-    let mut versions: Vec<String> = fs::read_dir(&p.versions).ok().map(|it| it.flatten()
-        .filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
-    versions.retain(|v| Some(v) != cur.as_ref());
-    versions.sort_by(|a, b| cmp_ver(a, b));
-    let target = versions.pop().unwrap_or_else(|| die("no previous version to roll back to"));
+    let target = load_history(p).unwrap_or_else(|e| die(&e))
+        .and_then(|h| h.previous).unwrap_or_else(|| die("no verified previous activation; run setup to establish current history or use supported recovery"));
+    let target_bin = p.versions.join(&target).join("bin");
+    if !OWNED_BINS.iter().all(|f| fs::metadata(target_bin.join(f)).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)) {
+        die("verified previous version is incomplete; use supported recovery");
+    }
     let s = running_sessions(p);
     if s != 0 {
         if s > 0 { die(&format!("{s} agent session(s) running — stop them first")); }
         die("Relay state unknown — refusing rollback (fail closed)");
     }
-    apply_runtime(p, &target, &p.versions.join(&target).join("bin"));
+    if !apply_runtime(p, &target, &target_bin) { return; }
     ok(&format!("rolled back {} -> {target}", cur.unwrap_or_else(|| "none".into())));
 }
 
@@ -835,6 +906,7 @@ fn cmd_uninstall(p: &Paths) {
     for u in OWNED_UNITS { let _ = fs::remove_file(p.units.join(u)); }
     if systemd_ok() { let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status(); }
     let _ = fs::remove_file(&p.current);
+    let _ = fs::remove_file(p.root.join("activation.json"));
     ok(&format!("units + activation removed; state preserved under {}", p.root.display()));
     println!("  full state removal: reposuite purge-state");
 }
