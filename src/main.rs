@@ -283,18 +283,61 @@ fn write_units(p: &Paths, bin: &Path) {
         p.root.display());
     let _ = fs::write(p.units.join("reposuite-gateway.service"), gw);
     let _ = fs::write(p.units.join("reposuite-relay.service"), rl);
-    let wss = env::var("REPOSUITE_CLOUD_WSS").or_else(|_| env::var("RSC_WS_URL"))
-        .unwrap_or_else(|_| "wss://app.reposuite.com/gateway".into());
-    let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string();
-    let _ = fs::write(&p.env_file, format!("REPOSUITE_CLOUD_WSS={wss}\nREPOSUITE_GATEWAY_LABEL={host}\n"));
-    let _ = fs::set_permissions(&p.env_file, fs::Permissions::from_mode(0o600));
+
 }
 
-struct Snapshot { version: Option<String>, units: BTreeMap<String, Option<Vec<u8>>> }
+// Existing environment files are operator configuration.  Reusing them
+// byte-for-byte retains the endpoint and all other supported local settings.
+// An explicit target may change only that setting, and never while paired.
+fn planned_env(p: &Paths) -> Result<Option<Vec<u8>>, String> {
+    let requested = env::var("REPOSUITE_CLOUD_WSS").ok().or_else(|| env::var("RSC_WS_URL").ok());
+    if requested.as_ref().is_some_and(|v| v.is_empty() || v.contains(['\n', '\r', '\0'])) {
+        return Err("invalid cloud endpoint".into());
+    }
+    let existing = match fs::read(&p.env_file) {
+        Ok(v) => Some(v),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("read existing gateway environment: {e}")),
+    };
+    match (existing, requested) {
+        (Some(_), None) => Ok(None),
+        (None, target) => {
+            if paired(p) { return Err("paired runtime has no existing gateway environment; use supported recovery before changing its endpoint".into()); }
+            let wss = target.unwrap_or_else(|| "wss://app.reposuite.com/gateway".into());
+            let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string();
+            Ok(Some(format!("REPOSUITE_CLOUD_WSS={wss}\nREPOSUITE_GATEWAY_LABEL={host}\n").into_bytes()))
+        }
+        (Some(bytes), Some(target)) => {
+            let text = std::str::from_utf8(&bytes).map_err(|_| "cannot safely change a non-UTF-8 gateway environment")?;
+            let mut matches = text.lines().filter_map(|l| l.strip_prefix("REPOSUITE_CLOUD_WSS="));
+            let old = matches.next().ok_or("cannot safely determine existing gateway endpoint; use supported recovery")?;
+            if matches.next().is_some() { return Err("multiple gateway endpoints in environment; use supported recovery".into()); }
+            let unquoted = old.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                .or_else(|| old.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))).unwrap_or(old);
+            if unquoted == target { return Ok(None); }
+            if paired(p) { return Err("paired runtime endpoint cannot be changed by setup/update/rollback; use supported recovery".into()); }
+            let replacement = format!("REPOSUITE_CLOUD_WSS={target}");
+            let mut out = String::new();
+            for line in text.split_inclusive('\n') {
+                if line.starts_with("REPOSUITE_CLOUD_WSS=") {
+                    out.push_str(&replacement);
+                    if line.ends_with('\n') { out.push('\n'); }
+                } else { out.push_str(line); }
+            }
+            Ok(Some(out.into_bytes()))
+        }
+    }
+}
+struct Snapshot { version: Option<String>, units: BTreeMap<String, Option<Vec<u8>>>, environment: Option<(Vec<u8>, u32)> }
 fn snapshot(p: &Paths) -> Snapshot {
     let mut units = BTreeMap::new();
     for u in OWNED_UNITS { units.insert(u.to_string(), fs::read(p.units.join(u)).ok()); }
-    Snapshot { version: current_version(p), units }
+    let environment = match fs::read(&p.env_file) {
+        Ok(bytes) => Some((bytes, fs::metadata(&p.env_file).unwrap_or_else(|e| die(&format!("inspect gateway environment: {e}"))).permissions().mode() & 0o777)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => die(&format!("snapshot gateway environment: {e}")),
+    };
+    Snapshot { version: current_version(p), units, environment }
 }
 // owned_pids returns PIDs of live processes whose executable lives inside
 // this installation's versioned tree. Strictly scoped: the /proc exe target
@@ -335,6 +378,11 @@ fn kill_pids(pids: &[u32]) {
 
 fn restore(p: &Paths, s: &Snapshot) -> bool {
     let mut all = true;
+    let env_result = match &s.environment {
+        Some((bytes, mode)) => fs::write(&p.env_file, bytes).and_then(|_| fs::set_permissions(&p.env_file, fs::Permissions::from_mode(*mode))),
+        None => match fs::remove_file(&p.env_file) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e), _ => Ok(()) },
+    };
+    if env_result.is_err() { all = false; }
     match &s.version {
         Some(v) => {
             for (u, content) in &s.units {
@@ -396,6 +444,7 @@ fn health_wait(p: &Paths) -> bool {
     false
 }
 fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
+    let new_env = planned_env(p).unwrap_or_else(|e| die(&e));
     let snap = snapshot(p);
     let fail = |msg: &str| -> ! {
         eprintln!("reposuite: {msg} — restoring previous runtime");
@@ -406,6 +455,10 @@ fn apply_runtime(p: &Paths, version: &str, bin: &Path) {
         std::process::exit(1)
     };
     if activate(p, version).is_err() { fail("activation error"); }
+    if let Some(bytes) = new_env {
+        let write = fs::write(&p.env_file, bytes).and_then(|_| fs::set_permissions(&p.env_file, fs::Permissions::from_mode(0o600)));
+        if write.is_err() { fail("cannot write gateway environment"); }
+    }
     write_units(p, bin);
     if !systemd_ok() { ok("systemd --user unavailable — staged only"); return; }
     if !cmd_ok("systemctl", &["--user", "daemon-reload"]) { fail("daemon-reload failed"); }

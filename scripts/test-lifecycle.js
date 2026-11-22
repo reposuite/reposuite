@@ -223,6 +223,7 @@ esac
     chk('first-install failure reports removal', /removed failed install|previous/.test(r.stderr + r.stdout));
     chk('no activation left behind', !fs.existsSync(paths.current));
     chk('unit files removed', !fs.existsSync(path.join(paths.units, 'reposuite-gateway.service')));
+    chk('first-install failed environment removed', !fs.existsSync(path.join(paths.data, 'reposuite', 'gateway.env')));
     fs.rmSync(t, { recursive: true, force: true });
   }
 
@@ -368,6 +369,79 @@ esac
     fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
     const retry = run(t, env, ['setup']);
     chk('retry after concurrent installer exits succeeds', retry.status === 0);
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // Preserve the existing endpoint AND other operator settings through all
+  // activation paths when the calling shell supplies no endpoint override.
+  for (const operation of ['setup', 'update-apply', 'rollback']) {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.2'); pkgBin(t);
+    delete env.REPOSUITE_CLOUD_WSS; delete env.RSC_WS_URL;
+    const envPath = path.join(paths.data, 'reposuite', 'gateway.env');
+    const original = 'REPOSUITE_CLOUD_WSS=wss://127.0.0.1:1/gateway\nREPOSUITE_GATEWAY_LABEL=local-label\nREPOSUITE_EXTRA_SETTING=keep-me\n';
+    fs.writeFileSync(envPath, original, { mode: 0o600 });
+    if (operation === 'rollback') {
+      const old = path.join(paths.data, 'reposuite', 'versions', '0.0.1', 'bin');
+      fs.mkdirSync(old, { recursive: true });
+      for (const b of ['reposuite-gateway', 'reposuite-relay']) fs.writeFileSync(path.join(old, b), 'old', { mode: 0o755 });
+    }
+    seedRelayHealth(paths, port);
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const r = run(t, env, [operation]);
+    chk(`${operation} with no endpoint override succeeds`, r.status === 0);
+    chk(`${operation} retains endpoint and local configuration exactly`, fs.readFileSync(envPath, 'utf8') === original);
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // An unpaired explicit endpoint change preserves other local settings.
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1'); pkgBin(t);
+    const envPath = path.join(paths.data, 'reposuite', 'gateway.env');
+    fs.writeFileSync(envPath, 'REPOSUITE_CLOUD_WSS=wss://127.0.0.1:1/gateway\nREPOSUITE_EXTRA_SETTING=keep-me\n', { mode: 0o600 });
+    seedRelayHealth(paths, port);
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const r = run(t, { ...env, REPOSUITE_CLOUD_WSS: 'wss://127.0.0.1:2/gateway' }, ['update-apply']);
+    chk('unpaired explicit endpoint update succeeds and preserves settings', r.status === 0 && fs.readFileSync(envPath, 'utf8') === 'REPOSUITE_CLOUD_WSS=wss://127.0.0.1:2/gateway\nREPOSUITE_EXTRA_SETTING=keep-me\n');
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // An explicitly changed endpoint must be rolled back with the runtime on
+  // failed activation, including file mode and unrelated settings.
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1'); pkgBin(t);
+    const envPath = path.join(paths.data, 'reposuite', 'gateway.env');
+    const original = 'REPOSUITE_CLOUD_WSS=wss://127.0.0.1:1/gateway\nREPOSUITE_EXTRA_SETTING=keep-me\n';
+    fs.writeFileSync(envPath, original, { mode: 0o600 });
+    seedRelayHealth(paths, port);
+    const r = run(t, { ...env, REPOSUITE_CLOUD_WSS: 'wss://127.0.0.1:2/gateway', REPOSUITE_FAULT_INJECT: 'start' }, ['update-apply']);
+    chk('failed activation after explicit endpoint change fails', r.status !== 0 && /injected service failure/.test(r.stderr));
+    chk('failed activation restores environment bytes and mode', fs.readFileSync(envPath, 'utf8') === original && (fs.statSync(envPath).mode & 0o777) === 0o600);
+    chk('failed endpoint activation restores selection', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // A paired identity may retain its target, but an implicit migration to a
+  // different target is refused before units, selection or config change.
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1'); pkgBin(t);
+    const root = path.join(paths.data, 'reposuite');
+    const envPath = path.join(root, 'gateway.env');
+    const original = 'REPOSUITE_CLOUD_WSS=wss://127.0.0.1:1/gateway\n';
+    fs.writeFileSync(envPath, original, { mode: 0o600 });
+    fs.mkdirSync(path.join(root, 'gateway', 'cloud'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'gateway', 'cloud', 'gateway.json'), JSON.stringify({gateway:'TEST',credential:'test-only'}), { mode: 0o600 });
+    seedRelayHealth(paths, port);
+    const unitPath = path.join(paths.units, 'reposuite-gateway.service');
+    const beforeUnit = fs.readFileSync(unitPath, 'utf8');
+    const r = run(t, { ...env, REPOSUITE_CLOUD_WSS: 'wss://127.0.0.1:2/gateway' }, ['update-apply']);
+    chk('paired identity refuses changing endpoint', r.status !== 0 && /paired runtime endpoint cannot be changed/.test(r.stderr));
+    chk('paired refusal preserves environment, unit, and selection', fs.readFileSync(envPath, 'utf8') === original && fs.readFileSync(unitPath, 'utf8') === beforeUnit && path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
     fs.rmSync(t, { recursive: true, force: true });
   }
 
