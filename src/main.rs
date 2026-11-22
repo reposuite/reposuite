@@ -203,7 +203,7 @@ fn running_sessions(p: &Paths) -> i64 {
 fn write_units(p: &Paths, bin: &Path) {
     let _ = fs::create_dir_all(&p.units);
     let b = bin.display();
-    let gw = format!("[Unit]\nDescription=RepoSuite Gateway (user)\nAfter=default.target\n\n[Service]\nUMask=0077\nEnvironmentFile={}\nEnvironment=REPOSUITE_RSR_HOME={}\nEnvironment=REPOSUITE_GATEWAY_STATE={}\nExecStart={b}/reposuite-gateway serve --data-dir {} --socket {}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
+    let gw = format!("[Unit]\nDescription=RepoSuite Gateway (user)\n\n[Service]\nUMask=0077\nEnvironmentFile={}\nEnvironment=REPOSUITE_RSR_HOME={}\nEnvironment=REPOSUITE_GATEWAY_STATE={}\nExecStart={b}/reposuite-gateway serve --data-dir {} --socket {}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",
         p.env_file.display(), p.relay.display(), p.gateway.display(),
         p.gateway.join("store").display(), p.socket.display());
     let rl = format!("[Unit]\nDescription=RepoSuite Relay (user)\nAfter=reposuite-gateway.service\n\n[Service]\nUMask=0077\nEnvironment=REPOSUITE_HOME={}\nExecStart={b}/reposuite-relay serve\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n",

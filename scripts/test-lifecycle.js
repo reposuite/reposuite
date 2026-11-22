@@ -237,6 +237,11 @@ esac
     const r = run(t, env, ['setup']);
     chk('delayed-readiness setup exits zero', r.status === 0);
     chk('activation recorded', fs.existsSync(paths.current));
+    const gatewayUnit = fs.readFileSync(path.join(paths.units, 'reposuite-gateway.service'), 'utf8');
+    const relayUnit = fs.readFileSync(path.join(paths.units, 'reposuite-relay.service'), 'utf8');
+    chk('gateway unit does not order after its own enabling target', !/^After=.*\bdefault\.target\b/m.test(gatewayUnit));
+    chk('relay is ordered after gateway', /^After=reposuite-gateway\.service$/m.test(relayUnit));
+    chk('both services are enabled by default.target', [gatewayUnit, relayUnit].every(u => /^WantedBy=default\.target$/m.test(u)));
     fs.rmSync(t, { recursive: true, force: true });
   }
 
