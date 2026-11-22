@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -41,6 +43,77 @@ fn paths() -> Paths {
 fn die(msg: &str) -> ! { eprintln!("reposuite: {msg}"); std::process::exit(1) }
 fn ok(msg: &str) { println!("reposuite: {msg}") }
 fn mkdir700(p: &Path) { let _ = fs::create_dir_all(p); let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o700)); }
+// Serialize changes to units, selection and version directories.  Keep the
+// lock outside the removable runtime root so purge cannot unlink a held lock.
+fn runtime_lock(p: &Paths) -> fs::File {
+    let parent = p.root.parent().unwrap_or_else(|| die("runtime has no parent"));
+    fs::create_dir_all(parent).unwrap_or_else(|e| die(&format!("create runtime parent: {e}")));
+    let f = fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+        .open(parent.join(".reposuite-runtime.lock"))
+        .unwrap_or_else(|e| die(&format!("open runtime lock: {e}")));
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        die("another runtime operation is in progress — retry when it finishes");
+    }
+    f
+}
+
+fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let mut a = fs::File::open(a)?;
+    let mut b = fs::File::open(b)?;
+    for f in [&a, &b] {
+        let m = f.metadata()?;
+        if !m.is_file() || m.permissions().mode() & 0o111 == 0 { return Ok(false); }
+    }
+    if a.metadata()?.len() != b.metadata()?.len() { return Ok(false); }
+    let mut x = [0u8; 65536]; let mut y = [0u8; 65536];
+    loop {
+        let n = a.read(&mut x)?; let m = b.read(&mut y)?;
+        if n != m || x[..n] != y[..m] { return Ok(false); }
+        if n == 0 { return Ok(true); }
+    }
+}
+fn same_pair(source: &Path, target: &Path) -> bool {
+    OWNED_BINS.iter().all(|f| same_file(&source.join(f), &target.join(f)).unwrap_or(false))
+}
+fn version_conflict() -> String {
+    format!("installed version {VERSION} is incomplete or differs from this package; use a new build/version or supported recovery")
+}
+// Build the complete version outside versions/ and publish it atomically.
+// RENAME_NOREPLACE prevents clobbering even an uncooperative concurrent writer.
+fn install_pair(p: &Paths, source: &Path, reuse: bool) -> Result<PathBuf, String> {
+    let dest = p.versions.join(VERSION);
+    let bin = dest.join("bin");
+    if fs::symlink_metadata(&dest).is_ok() {
+        return if reuse && same_pair(source, &bin) { Ok(bin) } else if reuse {
+            Err(version_conflict())
+        } else { Err(format!("cannot stage {VERSION} without overwriting an existing version")) };
+    }
+    fs::create_dir_all(&p.versions).map_err(|e| format!("create versions directory: {e}"))?;
+    for dir in [&p.root, &p.versions] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| format!("protect runtime directory: {e}"))?;
+    }
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let stage = p.root.join(format!(".setup-stage-{}-{nonce}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&stage).map_err(|e| format!("create staging directory: {e}"))?;
+    let result = (|| -> Result<(), String> {
+        let staged_bin = stage.join("bin");
+        fs::DirBuilder::new().mode(0o700).create(&staged_bin).map_err(|e| format!("create staging bin: {e}"))?;
+        for f in OWNED_BINS {
+            fs::copy(source.join(f), staged_bin.join(f)).map_err(|e| format!("stage {f}: {e}"))?;
+        }
+        if !same_pair(source, &staged_bin) { return Err("staged binary pair is incomplete or differs from the package".into()); }
+        let from = std::ffi::CString::new(stage.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        let to = std::ffi::CString::new(dest.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        if unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EEXIST) && reuse && same_pair(source, &bin) { return Ok(()); }
+            return Err(if e.raw_os_error() == Some(libc::EEXIST) { version_conflict() } else { format!("install staged version: {e}") });
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&stage);
+    result.map(|_| bin)
+}
 fn have(cmd: &str) -> bool {
     env::var("PATH").map(|p| p.split(':').any(|d| Path::new(d).join(cmd).exists())).unwrap_or(false)
 }
@@ -408,19 +481,20 @@ fn read_invite() -> String {
 
 fn cmd_setup(p: &Paths) {
     let b = pkg_bin_dir().unwrap_or_else(|| die("native binaries not found — is the platform package installed?"));
-    mkdir700(&p.root);
-    migrate_legacy(p);
-    let switching = current_version(p).map(|v| v != VERSION).unwrap_or(false);
-    if switching && is_active("reposuite-relay") {
+    let version_dir = p.versions.join(VERSION);
+    if fs::symlink_metadata(&version_dir).is_ok() && !same_pair(&b, &version_dir.join("bin")) {
+        die(&version_conflict());
+    }
+    if is_active("reposuite-relay") {
         let s = running_sessions(p);
         if s != 0 {
-            if s > 0 { die(&format!("{s} agent session(s) running — setup staged; run 'reposuite update apply' later")); }
-            die("Relay state unknown — staging only (fail closed)");
+            if s > 0 { die(&format!("{s} agent session(s) running — setup deferred; retry after they finish")); }
+            die("Relay state unknown — setup deferred (fail closed)");
         }
     }
-    let vdir = p.versions.join(VERSION).join("bin");
-    mkdir700(&vdir);
-    for f in OWNED_BINS { fs::copy(b.join(f), vdir.join(f)).unwrap_or_else(|e| die(&format!("copy {f}: {e}"))); }
+    let vdir = install_pair(p, &b, true).unwrap_or_else(|e| die(&e));
+    mkdir700(&p.root);
+    migrate_legacy(p);
     mkdir700(&p.gateway); mkdir700(&p.relay);
     mkdir700(&p.gateway.join("store"));   // SQLite store root (strict whitelist)
     mkdir700(&p.gateway.join("cloud"));   // durable cloud identity/creds
@@ -663,14 +737,7 @@ fn cmd_update_apply(p: &Paths) {
         die("Relay state unknown — deferring activation (fail closed)");
     }
     let b = pkg_bin_dir().unwrap_or_else(|| die("new package carries no platform binaries"));
-    mkdir700(&p.versions);
-    let version_dir = p.versions.join(VERSION);
-    fs::DirBuilder::new().mode(0o700).create(&version_dir)
-        .unwrap_or_else(|e| die(&format!("cannot stage {VERSION} without overwriting an existing version: {e}")));
-    let vdir = version_dir.join("bin");
-    fs::DirBuilder::new().mode(0o700).create(&vdir)
-        .unwrap_or_else(|e| die(&format!("cannot create staging directory: {e}")));
-    for f in OWNED_BINS { fs::copy(b.join(f), vdir.join(f)).unwrap_or_else(|e| die(&format!("copy {f}: {e}"))); }
+    let vdir = install_pair(p, &b, false).unwrap_or_else(|e| die(&e));
     apply_runtime(p, VERSION, &vdir);
     ok(&format!("activated {VERSION}{}", cur.filter(|c| c != VERSION).map(|c| format!(" (previous {c} kept for rollback)")).unwrap_or_default()));
 }
@@ -761,6 +828,10 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let p = paths();
     let sub: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let _lock = match sub.as_slice() {
+        ["setup"] | ["update", "apply"] | ["update-apply"] | ["rollback"] | ["uninstall"] | ["purge-state", ..] | ["migrate"] => Some(runtime_lock(&p)),
+        _ => None,
+    };
     match sub.as_slice() {
         ["setup"] => cmd_setup(&p),
         ["pair", "--invite"] => cmd_pair_manual(&p),

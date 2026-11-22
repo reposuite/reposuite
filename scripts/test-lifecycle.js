@@ -301,6 +301,76 @@ esac
     fs.rmSync(t, { recursive: true, force: true });
   }
 
+  // Same-version setup must reuse the complete pair, even while an executable
+  // is running. Conflicting or incomplete pairs must not change any runtime.
+  for (const mode of ['identical', 'different', 'incomplete']) {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const ver = execFileSync(CLI, ['version'], { encoding: 'utf8' }).trim();
+    const { env, paths } = setupEnv(t, ver);
+    pkgBin(t);
+    const installed = path.join(paths.data, 'reposuite', 'versions', ver, 'bin');
+    const pkg = path.join(t, 'pkgbin');
+    fs.copyFileSync('/bin/sleep', path.join(installed, 'reposuite-gateway'));
+    fs.copyFileSync(mode === 'different' ? '/bin/true' : '/bin/sleep', path.join(pkg, 'reposuite-gateway'));
+    fs.writeFileSync(path.join(pkg, 'reposuite-relay'), 'old', { mode: 0o755 });
+    if (mode === 'incomplete') fs.unlinkSync(path.join(installed, 'reposuite-relay'));
+    const sleeper = spawn(path.join(installed, 'reposuite-gateway'), ['600']);
+    fs.writeFileSync(path.join(env.HOME, '.fake-services'), 'reposuite-gateway\nreposuite-relay\n');
+    seedRelayHealth(paths, port);
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const snapshot = () => ({
+      current: fs.readlinkSync(paths.current),
+      unit: fs.readFileSync(path.join(paths.units, 'reposuite-gateway.service'), 'utf8'),
+      gateway: fs.readFileSync(path.join(installed, 'reposuite-gateway')).toString('base64'),
+      inode: fs.statSync(path.join(installed, 'reposuite-gateway')).ino,
+      relay: fs.existsSync(path.join(installed, 'reposuite-relay')) ? fs.readFileSync(path.join(installed, 'reposuite-relay'), 'utf8') : null,
+    });
+    const before = snapshot();
+    const r = run(t, env, ['setup']);
+    const after = snapshot();
+    chk(`${mode} running executable gives expected result`, mode === 'identical' ? r.status === 0 : r.status !== 0 && /incomplete or differs.*new build\/version or supported recovery/.test(r.stderr));
+    chk(`${mode} preserves running binary bytes and inode`, before.gateway === after.gateway && before.inode === after.inode && fs.existsSync(`/proc/${sleeper.pid}/exe`));
+    chk(`${mode} preserves installed relay`, before.relay === after.relay);
+    if (mode !== 'identical') chk(`${mode} preserves selection and units`, before.current === after.current && before.unit === after.unit);
+    sleeper.kill('SIGKILL');
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // A partial source must not leave an installed version behind.
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1'); pkgBin(t);
+    fs.unlinkSync(path.join(t, 'pkgbin', 'reposuite-relay'));
+    const ver = execFileSync(CLI, ['version'], { encoding: 'utf8' }).trim();
+    const r = run(t, env, ['setup']);
+    chk('missing package member refuses incomplete staging', r.status !== 0 && /stage reposuite-relay/.test(r.stderr));
+    chk('failed staging leaves no installed version or temporary stage', !fs.existsSync(path.join(paths.data, 'reposuite', 'versions', ver)) && !fs.readdirSync(path.join(paths.data, 'reposuite')).some(n => n.startsWith('.setup-stage-')));
+    chk('failed staging leaves selection unchanged', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
+  // Hold the same real flock as another installer, then retry after release.
+  {
+    const t = fs.mkdtempSync(path.join(os.tmpdir(), 'rslife-'));
+    const { env, paths } = setupEnv(t, '0.0.1'); pkgBin(t);
+    const lock = path.join(paths.data, '.reposuite-runtime.lock');
+    const ready = path.join(t, 'locked');
+    const holder = spawn('flock', ['-x', lock, 'sh', '-c', 'touch "$1"; sleep 30', 'sh', ready], { detached: true });
+    for (let i = 0; i < 100 && !fs.existsSync(ready); i++) await new Promise(r => setTimeout(r, 20));
+    const r = run(t, env, ['setup']);
+    chk('concurrent installer fails with retry diagnostic', fs.existsSync(ready) && r.status !== 0 && /another runtime operation.*retry/.test(r.stderr));
+    chk('concurrent refusal leaves current selection unchanged', path.basename(fs.readlinkSync(paths.current)) === '0.0.1');
+    process.kill(-holder.pid, 'SIGTERM');
+    await new Promise(resolve => holder.once('exit', resolve));
+    seedRelayHealth(paths, port);
+    fs.mkdirSync(path.join(paths.run, 'reposuite'), { recursive: true });
+    fs.writeFileSync(path.join(paths.run, 'reposuite', 'gateway.sock'), '');
+    const retry = run(t, env, ['setup']);
+    chk('retry after concurrent installer exits succeeds', retry.status === 0);
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+
   child.kill();
   console.log(fail ? 'lifecycle: FAILED' : 'lifecycle: OK');
   process.exit(fail);
