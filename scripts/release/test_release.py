@@ -98,7 +98,7 @@ def plat_pkg():
     }
 
 
-def pins_text(built, go_gateway="go1.27.3", go_relay="go1.27.1", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
+def pins_text(built, go_gateway="go1.27.4", go_relay="go1.27.1", rust="rustc 1.93.1 (01f6ddf75 2026-02-11)"):
     return (
         f"control=\ngateway={GW}\nrelay={RY}\n"
         f"distribution={DIST}\ngo_gateway={go_gateway}\ngo_relay={go_relay}\nrust={rust}\nbuilt={built}\n"
@@ -235,6 +235,9 @@ def main():
         chk("workflow setup uses gateway builder toolchain", setup in workflow)
         chk("workflow gateway preflight matches builder", preflight in workflow)
         chk("workflow gateway binary proof matches builder", proof in workflow)
+        verifier = (SCRIPTS / "verify_artifacts.py").read_text()
+        chk("artifact verifier gateway pin matches builder", 'pins_kv.get("go_gateway") != "' + expected + '"' in verifier)
+        chk("workflow checks packaged Go binaries", "python3 scripts/release/verify_go_binaries.py" in workflow)
     tmp = Path(tempfile.mkdtemp(prefix="reltst-"))
     os.chdir(tmp)
 
@@ -307,8 +310,8 @@ def main():
                            entry_over={"package/bin/reposuite.js": (b"// tampered\n", 0o644)}))
     chk_reject("verify: mutated launcher rejected", r, "launcher")
 
-    r = run_verify(sandbox(tmp / "badgo", pins_kw={"go_gateway": "go1.24.3"}))
-    chk_reject("verify: wrong go pin rejected", r, "go1.27.3")
+    r = run_verify(sandbox(tmp / "badgo", pins_kw={"go_gateway": "go1.27.3"}))
+    chk_reject("verify: stale gateway go pin rejected", r, "go1.27.4")
     r = run_verify(sandbox(tmp / "badrelaygo", pins_kw={"go_relay": "go1.27.3"}))
     chk_reject("verify: wrong relay go pin rejected", r, "go1.27.1")
 

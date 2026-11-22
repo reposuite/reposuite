@@ -177,6 +177,7 @@ jobs:
           bash scripts/release/build.sh
           bash scripts/release/package.sh
           bash scripts/release/verify.sh
+          python3 scripts/release/verify_go_binaries.py
       - run: node scripts/test-lifecycle.js
       - run: node scripts/smoke-install.js
       - name: gateway test suite
